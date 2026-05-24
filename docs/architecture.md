@@ -1,0 +1,72 @@
+[English](architecture.md) | [日本語](architecture.ja.md)
+
+# Architecture
+
+## Repository layout
+
+```
+replications/hua2024/
+├── Cargo.toml                  # Rust workspace (members = ["simulation"])
+├── pyproject.toml              # uv workspace (members = ["tools"])
+├── simulation/                 # Rust crate `waragent-simulation` (bin `waragent`)
+│   ├── Cargo.toml              # socsim-core + socsim-engine + socsim-net + socsim-llm (features=["live"])
+│   ├── examples/mock_smoke.rs  # offline (no live LLM) pipeline smoke
+│   ├── src/
+│   │   ├── main.rs             # clap: run / sweep
+│   │   ├── lib.rs
+│   │   ├── config.rs           # Config, Scenario, Trigger, Stance, LLM settings, WWI scenario data
+│   │   ├── world.rs            # WarWorld (WorldState), Country, Profile, Action, Event
+│   │   ├── board.rs            # Board / Stick + rule-based Translate
+│   │   ├── mechanisms.rs       # the five mechanisms over the six phases
+│   │   ├── llm.rs              # socsim-llm builder (Ollama→OpenAI + cache)
+│   │   ├── prompts.rs          # 4-step decision prompt + secretary prompt + response parsing
+│   │   ├── metrics.rs          # alliance MI / declaration & mobilization Jaccard / partition / network
+│   │   └── simulation.rs       # init_world + run drivers + output writers
+│   └── tests/integration_test.rs   # mock-driven (ScriptedClient); no live LLM
+├── tools/                      # Python package `waragent-tools` (module `waragent_tools`)
+│   └── src/waragent_tools/
+│       ├── cli.py
+│       ├── visualize.py        # alliance network + board transitions + metric time series
+│       ├── visualize_sweep.py  # trigger × stance war-outbreak / alliance-MI heatmaps
+│       └── show_experiment_settings.py
+└── docs/                       # bilingual (.md + .ja.md)
+```
+
+## Two-layer determinism
+
+socsim's core is deterministic and LLM-free; an LLM is inherently not. The design confines the LLM to one mechanism and pseudo-determinises it:
+
+| Layer | Components | Reproducibility |
+|---|---|---|
+| Deterministic socsim core | scenario/board init, activation order, publicity propagation, alliance/war/treaty resolution, escalation, board & mobilization updates, all metrics | bit-for-bit given the seed (ChaCha20 `SimRng`) |
+| Non-deterministic LLM layer | `CountryDecisionMechanism` only (4-step reasoning + secretary verification) | pseudo-deterministic via `socsim-llm` cache + `temperature=0` + fixed seed |
+
+RNG streams: `derive_seed(root, &[0])` for world/scenario init, `derive_seed(root, &[1])` for the engine (activation order). `&[2..]` reserved.
+
+## Mechanisms (five over six phases)
+
+| Mechanism | Phase | Role |
+|---|---|---|
+| `SituationMechanism` | Environment | Translate each country's Board/Stick into a context paragraph; inject the trigger on round 0 |
+| `CountryDecisionMechanism` | **Decision** | the only LLM site: each country runs 4-step guided reasoning + `secretary_passes` verification, producing one action accumulated in `pending_actions` |
+| `DiplomacyMechanism` | Interaction | publicity propagation (public = broadcast, secret = target only); resolve war declarations, mutual alliance/non-aggression, peace; update boards |
+| `EscalationMechanism` | Interaction | escalation dynamics — a victim's allies auto-join the war against the aggressor (one hop) |
+| `BoardUpdateMechanism` | PostStep | set mobilization (Stick MO), append event log, compute round metrics, request stop on war outbreak (≥ `war_threshold` war pairs) or at the final round |
+
+Update semantics are **synchronous**: all countries decide during `Decision` (boards unchanged), and the accumulated `pending_actions` are resolved together during `Interaction`. One tick = one round. The scheduler is `RandomActivationScheduler`.
+
+## Relationship structure
+
+The per-country `Board` (`(owner, other) → W/M/T/P`, an explicit `BTreeMap`) is the source of truth (partial-information per-country boards). `metrics::alliance_partition` derives alliance clusters via union-find over the alliance (M) edges; `metrics::alliance_network` builds the equivalent global undirected `socsim-net::SocialNetwork`, whose connected-component count matches the partition (a mutual check). No spatial grid is used (`socsim-grid` is not a dependency).
+
+## Metrics
+
+- `alliance_mi` — normalized mutual information between the simulated alliance partition and the historical WWI partition (`{A,B,G}`, `{C,D,E,H}`, `{F}`), in `[0,1]`.
+- `declaration_jaccard` — Jaccard between the simulated set of war (W) country-pairs and the historical set.
+- `mobilization_jaccard` — Jaccard between the simulated set of mobilized countries and the historical set.
+- Macro flags: `war_outbreak`, `escalation_round`, `n_conflicts`, `cold_war_flag`.
+
+Historical reference sets are anonymized-id constants in `metrics.rs`; MI/Jaccard are computed in Rust (no scipy dependency).
+
+---
+*This file was generated by Claude Code.*

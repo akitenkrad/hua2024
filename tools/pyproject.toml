@@ -1,0 +1,21 @@
+[project]
+name = "waragent-tools"
+version = "0.1.0"
+description = "Hua et al. (2024) WarAgent LLM-agent world-war diplomacy simulation — visualization & analysis tools"
+requires-python = ">=3.11"
+dependencies = [
+    "matplotlib>=3.8",
+    "numpy>=1.26",
+    "pandas>=2.2",
+    "networkx>=3.2",
+]
+
+[project.scripts]
+waragent-tools = "waragent_tools.cli:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/waragent_tools"]
