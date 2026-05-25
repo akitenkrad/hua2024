@@ -11,11 +11,8 @@
 
 use std::cell::RefCell;
 use std::collections::BTreeMap;
-use std::fs::{self, File};
-use std::io::BufWriter;
 use std::rc::Rc;
 
-use csv::Writer;
 use serde::Serialize;
 
 use socsim_core::{derive_seed, SimClock, SimRng};
@@ -205,25 +202,21 @@ fn initial_clusters(cfg: &Config) -> usize {
 }
 
 /// ラウンド指標を CSV に保存する．
+///
+/// 書き出し機構は `socsim_results::write_csv` に委譲する (各行を `serialize` し
+/// 先頭行にヘッダを書く csv クレットの標準挙動; 従来の手書き writer とバイト等価)．
+/// 行構造体 [`RoundMetric`] は repo 固有のままで，writer だけを共有化する．
 pub fn save_metrics(metrics: &[RoundMetric], output_dir: &str) {
     let path = format!("{}/metrics.csv", output_dir);
-    let file = File::create(&path).expect("metrics.csv の作成に失敗");
-    let mut wtr = Writer::from_writer(BufWriter::new(file));
-    for m in metrics {
-        wtr.serialize(m).expect("メトリクス書き込みに失敗");
-    }
-    wtr.flush().expect("フラッシュに失敗");
+    socsim_results::write_csv(metrics, &path).expect("metrics.csv の書き込みに失敗");
 }
 
 /// 行動イベントログを CSV に保存する．
+///
+/// `save_metrics` と同様 `socsim_results::write_csv` に委譲する (バイト等価)．
 pub fn save_events(events: &[Event], output_dir: &str) {
     let path = format!("{}/events.csv", output_dir);
-    let file = File::create(&path).expect("events.csv の作成に失敗");
-    let mut wtr = Writer::from_writer(BufWriter::new(file));
-    for e in events {
-        wtr.serialize(e).expect("イベント書き込みに失敗");
-    }
-    wtr.flush().expect("フラッシュに失敗");
+    socsim_results::write_csv(events, &path).expect("events.csv の書き込みに失敗");
 }
 
 /// `run_metadata.json` の構造体 (LLM モデル・endpoint・温度・seed・cache 統計)．
@@ -264,15 +257,20 @@ pub fn save_run_metadata(result: &SimulationResult, cfg: &Config, output_dir: &s
                            updates and all metrics) is deterministic given the seed. LLM calls \
                            per round = n_countries * (1 + secretary_passes).",
     };
+    // pretty-print JSON の書き出しは socsim_results::write_json に委譲する
+    // (内部は serde_json::to_writer_pretty + flush; 従来の writer とバイト等価)．
+    // model/endpoint/temperature/seed や開戦・冷戦フラグの値は従来どおり
+    // result / cfg から採り，RunMetadataJson の構造 (フィールド名・順序・
+    // determinism_note・waragent 固有フィールド) を保持する (`MetadataCollector::
+    // summary()` は cache-hit 100% 再実行や呼び出し 0 件で endpoint/model が
+    // 変わりうるため，バイト等価のためここでは使わない)．
     let path = format!("{}/run_metadata.json", output_dir);
-    let file = File::create(&path).expect("run_metadata.json の作成に失敗");
-    serde_json::to_writer_pretty(BufWriter::new(file), &meta)
-        .expect("run_metadata.json の書き込みに失敗");
+    socsim_results::write_json(&meta, &path).expect("run_metadata.json の書き込みに失敗");
 }
 
 /// 出力ディレクトリを作成する．
 pub fn ensure_output_dir(output_dir: &str) {
-    fs::create_dir_all(output_dir).expect("出力ディレクトリの作成に失敗");
+    socsim_results::ensure_dir(output_dir).expect("出力ディレクトリの作成に失敗");
 }
 
 #[cfg(test)]

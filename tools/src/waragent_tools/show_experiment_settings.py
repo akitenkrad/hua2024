@@ -10,29 +10,39 @@ Usage:
     waragent-tools show-experiment-settings
     waragent-tools show-experiment-settings --results-dir results/20260524_153000
     waragent-tools show-experiment-settings --results-dir results/latest --json
+
+I/O (results-dir 解決・run_metadata ロード) と run 設定テーブルは共有ヘルパ
+`socsim_tools` に委譲する (出力はバイト等価)．sweep 設定テーブル・waragent 固有の
+run_metadata ブロック (開戦・冷戦などの追加行)・`--json` の `kind` フィールドは
+waragent 固有なので本モジュールに残す．
 """
 
 from __future__ import annotations
 
 import argparse
 import json
-import os
 import sys
 from pathlib import Path
 
+from socsim_tools.io import load_run_metadata, resolve_results_dir
+from socsim_tools.settings import render_run_config
 
-def _resolve_results_dir(arg: str) -> Path:
-    """ユーザ指定の results_dir を絶対パスに解決する (symlink も実体へ)．"""
-    p = Path(arg)
-    if not p.is_absolute():
-        candidates = [Path.cwd() / arg, p]
-        for c in candidates:
-            if c.exists():
-                p = c
-                break
-        else:
-            p = candidates[0]
-    return Path(os.path.realpath(p))
+# config キー → 表示ラベル (右コロン位置を揃えるため空白パディング済み)．
+# render_run_config が `f"{label}: {value}"` で整形するため，ラベルは末尾の
+# `: ` を含めず，従来の run レンダラと同じ桁揃えになるようパディングする．
+FIELD_LABELS = {
+    "scenario": "シナリオ         ",
+    "trigger": "トリガー         ",
+    "stance_override": "スタンス上書き   ",
+    "secretary_passes": "秘書検証パス     ",
+    "rounds": "ラウンド数       ",
+    "war_threshold": "開戦しきい値     ",
+    "n_countries": "国数             ",
+    "seed": "シード (コア)    ",
+    "llm_temperature": "LLM 温度         ",
+    "llm_seed": "LLM seed         ",
+    "output_dir": "出力先           ",
+}
 
 
 def _find_config_file(results_dir: Path) -> tuple[Path, str]:
@@ -49,37 +59,8 @@ def _find_config_file(results_dir: Path) -> tuple[Path, str]:
     )
 
 
-def _load_run_metadata(results_dir: Path) -> dict | None:
-    path = results_dir / "run_metadata.json"
-    if path.exists():
-        with path.open() as f:
-            return json.load(f)
-    return None
-
-
-def render_run_config(cfg: dict, source: Path) -> str:
-    lines: list[str] = []
-    lines.append("=" * 70)
-    lines.append("実行設定 (run)")
-    lines.append("=" * 70)
-    lines.append(f"設定ファイル: {source}")
-    lines.append("-" * 70)
-    lines.append(f"シナリオ         : {cfg.get('scenario', '-')}")
-    lines.append(f"トリガー         : {cfg.get('trigger', '-')}")
-    lines.append(f"スタンス上書き   : {cfg.get('stance_override', '-')}")
-    lines.append(f"秘書検証パス     : {cfg.get('secretary_passes', '-')}")
-    lines.append(f"ラウンド数       : {cfg.get('rounds', '-')}")
-    lines.append(f"開戦しきい値     : {cfg.get('war_threshold', '-')}")
-    lines.append(f"国数             : {cfg.get('n_countries', '-')}")
-    lines.append(f"シード (コア)    : {cfg.get('seed', '-')}")
-    lines.append(f"LLM 温度         : {cfg.get('llm_temperature', '-')}")
-    lines.append(f"LLM seed         : {cfg.get('llm_seed', '-')}")
-    lines.append(f"出力先           : {cfg.get('output_dir', '-')}")
-    lines.append("=" * 70)
-    return "\n".join(lines)
-
-
 def render_sweep_config(cfg: dict, source: Path) -> str:
+    """sweep 設定テーブルを整形する (waragent 固有; リスト項目を `, ` 連結する)．"""
     lines: list[str] = []
     lines.append("=" * 70)
     lines.append("実行設定 (sweep)")
@@ -101,6 +82,12 @@ def render_sweep_config(cfg: dict, source: Path) -> str:
 
 
 def render_run_metadata(meta: dict) -> str:
+    """LLM 実行メタデータを整形する (waragent 固有; 開戦・冷戦などの追加行を含む)．
+
+    共有 `socsim_tools.settings.render_run_metadata` は war_outbreak /
+    escalation_round / n_conflicts / cold_war_flag 行を出力しないため，バイト
+    等価のためここに残す．
+    """
     lines: list[str] = []
     lines.append("")
     lines.append("LLM 実行メタデータ (run_metadata.json)")
@@ -145,22 +132,26 @@ def main(argv: list[str] | None = None) -> int:
     )
     args = parser.parse_args(argv)
 
-    results_dir = _resolve_results_dir(args.results_dir)
+    results_dir = resolve_results_dir(args.results_dir)
     if not results_dir.exists():
         print(f"エラー: ディレクトリが存在しません: {results_dir}", file=sys.stderr)
         return 1
 
-    cfg_path, kind = _find_config_file(results_dir)
+    try:
+        cfg_path, kind = _find_config_file(results_dir)
+    except FileNotFoundError as exc:
+        print(f"エラー: {exc}", file=sys.stderr)
+        return 1
     with cfg_path.open() as f:
         cfg = json.load(f)
-    meta = _load_run_metadata(results_dir)
+    meta = load_run_metadata(results_dir)
 
     if args.json:
         payload = {"source": str(cfg_path), "kind": kind, "config": cfg, "run_metadata": meta}
         print(json.dumps(payload, indent=2, ensure_ascii=False))
     else:
         if kind == "run":
-            print(render_run_config(cfg, cfg_path))
+            print(render_run_config(cfg, cfg_path, FIELD_LABELS))
         else:
             print(render_sweep_config(cfg, cfg_path))
         if meta is not None:

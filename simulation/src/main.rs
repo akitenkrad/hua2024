@@ -7,13 +7,11 @@
 //! Phase 3 の `reproduce` (論文 Table 2-5 一括再現・反実仮想分析・WWII/戦国時代
 //! シナリオ・脱匿名化) は未実装 (拡張点)．
 
-use std::fs::{self, File};
-use std::io::BufWriter;
+use std::fs;
 use std::path::Path;
 
-use chrono::Local;
 use clap::{Parser, Subcommand};
-use csv::Writer;
+use socsim_results::{refresh_latest_symlink, timestamp, write_csv, write_json};
 
 use waragent_simulation::config::{
     derive_run_seed, parse_scenario, parse_stance, parse_trigger, Config, LlmSettings, Scenario,
@@ -187,18 +185,6 @@ struct SweepConfigJson {
     llm_seed: u64,
 }
 
-/// latest シンボリックリンクを (再) 作成する．
-fn refresh_latest(output_dir: &str, target: &str) {
-    let symlink_path = Path::new(output_dir).join("latest");
-    if symlink_path.is_symlink() {
-        let _ = fs::remove_file(&symlink_path);
-    }
-    #[cfg(unix)]
-    {
-        let _ = std::os::unix::fs::symlink(target, &symlink_path);
-    }
-}
-
 /// カンマ区切り文字列を trim 済みの非空リストへ．
 fn split_csv(s: &str) -> Vec<String> {
     s.split(',')
@@ -219,7 +205,7 @@ fn cmd_run(args: RunArgs) {
         .as_deref()
         .map(|s| parse_stance(s).unwrap_or_else(|e| panic!("{e}")));
 
-    let timestamp = Local::now().format("%Y%m%d_%H%M%S").to_string();
+    let timestamp = timestamp();
     let output_dir = format!("{}/{}", args.output_dir, timestamp);
 
     if let Some(parent) = Path::new(&args.cache_path).parent() {
@@ -283,14 +269,12 @@ fn cmd_run(args: RunArgs) {
             save_events(&result.event_log, &output_dir);
             save_run_metadata(&result, &cfg, &output_dir);
             let path = format!("{output_dir}/config.json");
-            let file = File::create(&path).expect("config.json の作成に失敗");
-            serde_json::to_writer_pretty(BufWriter::new(file), &cfg.to_run_config_json())
-                .expect("config.json の書き込みに失敗");
+            write_json(&cfg.to_run_config_json(), &path).expect("config.json の書き込みに失敗");
             last_result = Some(result);
         }
     }
 
-    refresh_latest(&args.output_dir, &timestamp);
+    let _ = refresh_latest_symlink(&args.output_dir, &timestamp);
 
     let runs = args.runs.max(1);
     println!(
@@ -342,7 +326,7 @@ fn cmd_sweep(args: SweepArgs) {
         .map(|s| parse_stance(s).unwrap_or_else(|e| panic!("{e}")))
         .collect();
 
-    let timestamp = Local::now().format("%Y%m%d_%H%M%S").to_string();
+    let timestamp = timestamp();
     let sweep_dir = format!("{}/{}_sweep", args.output_dir, timestamp);
     fs::create_dir_all(&sweep_dir).expect("sweep ディレクトリの作成に失敗");
     if let Some(parent) = Path::new(&args.cache_path).parent() {
@@ -401,15 +385,10 @@ fn cmd_sweep(args: SweepArgs) {
         }
     }
 
-    // sweep_summary.csv
+    // sweep_summary.csv (各行を serialize; socsim_results::write_csv に委譲)．
     {
         let path = format!("{sweep_dir}/sweep_summary.csv");
-        let file = File::create(&path).expect("sweep_summary.csv の作成に失敗");
-        let mut wtr = Writer::from_writer(BufWriter::new(file));
-        for row in &summary_rows {
-            wtr.serialize(row).expect("サマリ行の書き込みに失敗");
-        }
-        wtr.flush().expect("フラッシュに失敗");
+        write_csv(&summary_rows, &path).expect("sweep_summary.csv の書き込みに失敗");
     }
 
     // sweep_config.json
@@ -428,12 +407,10 @@ fn cmd_sweep(args: SweepArgs) {
             llm_seed: args.llm_seed,
         };
         let path = format!("{sweep_dir}/sweep_config.json");
-        let file = File::create(&path).expect("sweep_config.json の作成に失敗");
-        serde_json::to_writer_pretty(BufWriter::new(file), &config_json)
-            .expect("sweep_config.json の書き込みに失敗");
+        write_json(&config_json, &path).expect("sweep_config.json の書き込みに失敗");
     }
 
-    refresh_latest(&args.output_dir, &format!("{timestamp}_sweep"));
+    let _ = refresh_latest_symlink(&args.output_dir, &format!("{timestamp}_sweep"));
 
     println!("===========================================================");
     println!("スイープ完了: {n_total} 実行");
