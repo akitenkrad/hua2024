@@ -2,7 +2,7 @@
 
 # CLI リファレンス
 
-Rust バイナリ `waragent` は 2 つのサブコマンド `run` / `sweep` を持つ (`reproduce` は Phase 3 で保留)．
+Rust バイナリ `waragent` は 3 つのサブコマンド `run` / `sweep` / `reproduce` を持つ．
 
 ## `waragent run`
 
@@ -55,6 +55,32 @@ cargo run --release -- sweep \
     --stance-values conservative,aggressive \
     --rounds 6 --runs 7 --seed 42
 ```
+
+## `waragent reproduce`
+
+論文の Table 2–5 ヘッドライン story — トリガー強度に応じた開戦頻度・同盟エスカレーション・同盟分極化 — を 3 つのトリガー条件 (`null` / `dardanelles` / `archduke-assassination`) で軽量シナリオ上に走らせ，観測値 vs 論文値のアンカー (PASS/off) と figure 入力を `reproduce_summary.json` に集約する．
+
+| オプション | 既定 | 意味 |
+|---|---|---|
+| `--scenario <S>` | `wwi-small` | シナリオ (軽量シナリオでバンドルをオフライン検証可能に保つ) |
+| `--secretary-passes <N>` | `1` | LLM 秘書検証パス数 |
+| `--rounds <N>` | `6` | 各トリガー条件の最大ラウンド数 (`--quick` で 2 に縮約) |
+| `--war-threshold <N>` | `2` | 開戦とみなす宣戦布告 (W) 対数 |
+| `--seed <N>` | `42` | シード基点 (トリガー条件ごとに派生) |
+| `--llm-temperature <F>` | `0.0` | 生成温度 |
+| `--llm-seed <N>` | `0` | 生成シード |
+| `--cache-path <P>` | `.llm_cache/cache.json` | プロンプト→応答キャッシュ (ライブ経路のみ; mock は in-memory) |
+| `--output-dir <D>` | `results` | 出力ベースディレクトリ |
+| `--mock` | off | ライブ LLM の代わりにトリガー感応な scripted mock を使う (オフライン / CI) |
+| `--quick` | off | 短縮再現 (`rounds=2`) |
+
+例 (オフライン・ライブ LLM 不要):
+
+```bash
+cargo run --release -- reproduce --mock --quick
+```
+
+`results/{timestamp}_reproduce/` に `reproduce_summary.json` と，トリガー条件ごとのサブディレクトリ (`metrics.csv` / `events.csv` / `run_metadata.json` / `config.json`) を書き出す．図は `uv run waragent-tools reproduce` で描画する (`--run --mock --quick` で先にバイナリを実行可能)．
 
 ## オフライン mock スモーク
 

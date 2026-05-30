@@ -69,6 +69,23 @@ cargo run --release -- sweep \
 uv run waragent-tools visualize-sweep
 ```
 
+### Paper figures/tables (`reproduce`)
+
+`reproduce` runs the paper's headline Table 2–5 story — trigger-intensity-dependent war-outbreak frequency, alliance escalation, and alliance polarization — over three trigger conditions (`null` / `dardanelles` / `archduke-assassination`) on the light `wwi-small` scenario, and aggregates observed-vs-paper anchors (PASS/off) plus figure inputs into `reproduce_summary.json`. `--mock` drives a scripted, trigger-sensitive decision policy so the whole bundle is reproducible offline with no live LLM; `--quick` shortens each condition to 2 rounds.
+
+```bash
+# Offline-verifiable path (no live LLM): scripted mock, short rounds
+cargo run --release -- reproduce --mock --quick
+
+# Live LLM path (Ollama-first), full rounds
+OLLAMA_MODEL=llama3.2:latest cargo run --release -- reproduce --rounds 6 --seed 42
+
+# Generate the Table 2–5 figures (optionally --run --mock --quick to run the binary first)
+uv run waragent-tools reproduce --run --mock --quick
+```
+
+The mock policy scales the most belligerent country's behavior by the injected breaking-event intensity: `archduke` (highest) declares war and pulls in allies (war outbreak + escalation), `dardanelles` (intermediate) mobilizes only (cold war, no outbreak), and `null` stays at peace — recovering the paper's qualitative ordering. Because the local default model (`llama3.2`) differs from the paper's GPT-4 / Claude-2, fidelity targets the qualitative trend (historical trigger escalates to war; null trigger remains a cold war / peace; alliance MI exceeds random), not the absolute Table 2 values.
+
 ## Outputs
 
 Each `run` writes `results/{timestamp}/` (with `results/latest` symlink):
@@ -82,6 +99,8 @@ Each `run` writes `results/{timestamp}/` (with `results/latest` symlink):
 
 A `sweep` writes `results/{timestamp}_sweep/` with `sweep_config.json` and `sweep_summary.csv`.
 
+A `reproduce` writes `results/{timestamp}_reproduce/` with `reproduce_summary.json` (observed-vs-paper anchors) and one subdirectory per trigger condition (`null/`, `dardanelles/`, `archduke-assassination/`), each holding `metrics.csv` / `events.csv` / `run_metadata.json` / `config.json`. The Python `reproduce` tool reads these and renders `figures/table2_alliance_escalation.png` and `figures/table5_trigger_compare.png`.
+
 ## Documentation
 
 - [Architecture](docs/architecture.md) ([日本語](docs/architecture.ja.md))
@@ -90,9 +109,13 @@ A `sweep` writes `results/{timestamp}_sweep/` with `sweep_config.json` and `swee
 
 ## Scope
 
-- **Phase 1** (core model: country agents + boards + Board/Stick + event log; five mechanisms over six phases; LLM decision layer + cache; WWI base run) — done.
-- **Phase 2** (`sweep` over trigger × stance; `visualize` / `visualize-sweep` / `show-experiment-settings`) — done.
-- **Phase 3** (`reproduce` for Table 2–5 batch + counterfactual analysis, WWII / Warring-States scenarios, de-anonymization) — deferred. Extension points are left in place: the `Scenario` enum, configurable `secretary_passes`, and the documented de-anonymization map (A=Germany, B=Austria-Hungary, …) in `config.rs`.
+- **Core model** — country agents + per-country boards + Board/Stick context + event log; five mechanisms over six phases; an LLM decision layer with a persistent prompt cache; the anonymized WWI scenario (`wwi` 8 countries, `wwi-small` 4 countries).
+- **`run`** — a single configuration (scenario × trigger × stance), with the cache giving cold→warm 100% hit-rate replay.
+- **`sweep`** — a trigger × stance grid aggregated into `sweep_summary.csv`.
+- **`reproduce`** — the paper's Table 2–5 headline story across the `null` / `dardanelles` / `archduke-assassination` trigger conditions, with observed-vs-paper anchors and figures; offline-verifiable via `--mock`.
+- **Visualization** — `visualize` / `visualize-sweep` / `show-experiment-settings` / `reproduce`.
+
+The model carries extension points for further analyses: the `Scenario` enum (for WWII / Warring-States), configurable `secretary_passes`, and the de-anonymization map (A=Germany, B=Austria-Hungary, …) documented in `config.rs`.
 
 ## Reference
 

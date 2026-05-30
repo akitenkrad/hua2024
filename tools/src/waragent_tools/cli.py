@@ -4,11 +4,14 @@ Usage:
     waragent-tools visualize [...]
     waragent-tools visualize-sweep [...]
     waragent-tools show-experiment-settings [...]
+    waragent-tools reproduce [...]
 
 各サブコマンドに続く引数は，対応するモジュールの argparse がそのまま受け取る．
 サブコマンドレベルで `--help` を付けると，そのサブコマンド自身のヘルプが表示される．
 
-`reproduce` (論文 Table 2-5 の一括再現・反実仮想分析) は Phase 3 で実装予定 (未提供)．
+`reproduce` は論文 (Hua et al. 2024) の Table 2-5 ヘッドライン指標を一括再現する
+(トリガー強度別の開戦頻度・エスカレーション・同盟分極化; `--run --mock --quick` で
+オフライン検証可能)．
 
 dispatcher の組み立ては共有ヘルパ `socsim_tools.cli.build_dispatcher` に委譲する
 (prog 名・サブコマンド・ヘルプ文・argv ルーティングは従来と同一)．可視化/設定表示の
@@ -34,6 +37,10 @@ main = build_dispatcher(
         "show-experiment-settings": (
             "実行結果ディレクトリの設定 (config / sweep_config / run_metadata) の表示",
             "waragent_tools.show_experiment_settings:main",
+        ),
+        "reproduce": (
+            "論文 Table 2-5 ヘッドライン指標の一括再現 (トリガー別 開戦/冷戦/同盟分極化 + figure)",
+            "waragent_tools.reproduce_paper:main",
         ),
     },
 )

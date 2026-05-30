@@ -2,7 +2,7 @@
 
 # CLI reference
 
-The Rust binary `waragent` has two subcommands: `run` and `sweep`. (`reproduce` is deferred to Phase 3.)
+The Rust binary `waragent` has three subcommands: `run`, `sweep`, and `reproduce`.
 
 ## `waragent run`
 
@@ -55,6 +55,32 @@ cargo run --release -- sweep \
     --stance-values conservative,aggressive \
     --rounds 6 --runs 7 --seed 42
 ```
+
+## `waragent reproduce`
+
+Reproduces the paper's Table 2–5 headline story — trigger-intensity-dependent war-outbreak frequency, alliance escalation, and alliance polarization — by running three trigger conditions (`null` / `dardanelles` / `archduke-assassination`) on a light scenario and aggregating observed-vs-paper anchors (PASS/off) plus figure inputs into `reproduce_summary.json`.
+
+| Option | Default | Meaning |
+|---|---|---|
+| `--scenario <S>` | `wwi-small` | scenario (light scenario keeps the bundle offline-verifiable) |
+| `--secretary-passes <N>` | `1` | LLM secretary verification passes |
+| `--rounds <N>` | `6` | max rounds per trigger condition (`--quick` shrinks to 2) |
+| `--war-threshold <N>` | `2` | war (W) pairs that count as outbreak |
+| `--seed <N>` | `42` | base seed (derived per trigger condition) |
+| `--llm-temperature <F>` | `0.0` | generation temperature |
+| `--llm-seed <N>` | `0` | generation seed |
+| `--cache-path <P>` | `.llm_cache/cache.json` | prompt→response cache (live path only; mock uses in-memory) |
+| `--output-dir <D>` | `results` | output base directory |
+| `--mock` | off | use a scripted, trigger-sensitive mock instead of a live LLM (offline / CI) |
+| `--quick` | off | short reproduction (`rounds=2`) |
+
+Example (offline, no live LLM):
+
+```bash
+cargo run --release -- reproduce --mock --quick
+```
+
+Writes `results/{timestamp}_reproduce/` with `reproduce_summary.json` and one subdirectory per trigger condition (`metrics.csv` / `events.csv` / `run_metadata.json` / `config.json`). Render the figures with `uv run waragent-tools reproduce` (add `--run --mock --quick` to run the binary first).
 
 ## Offline mock smoke
 

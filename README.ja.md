@@ -69,6 +69,23 @@ cargo run --release -- sweep \
 uv run waragent-tools visualize-sweep
 ```
 
+### 論文の図表 (`reproduce`)
+
+`reproduce` は論文のヘッドライン Table 2–5 の story — トリガー強度に応じた開戦頻度・同盟エスカレーション・同盟分極化 — を 3 つのトリガー条件 (`null` / `dardanelles` / `archduke-assassination`) で軽量シナリオ `wwi-small` 上に走らせ，観測値 vs 論文値のアンカー (PASS/off) と figure 入力を `reproduce_summary.json` に集約する．`--mock` はトリガー感応な scripted 決定ポリシーで駆動するため，バンドル全体がライブ LLM 無しにオフラインで再現可能になる．`--quick` は各条件を 2 ラウンドに縮約する．
+
+```bash
+# オフライン検証経路 (ライブ LLM 不要): scripted mock・短縮ラウンド
+cargo run --release -- reproduce --mock --quick
+
+# ライブ LLM 経路 (Ollama 第一)・フルラウンド
+OLLAMA_MODEL=llama3.2:latest cargo run --release -- reproduce --rounds 6 --seed 42
+
+# Table 2–5 の図を生成する (--run --mock --quick で先にバイナリを実行可能)
+uv run waragent-tools reproduce --run --mock --quick
+```
+
+mock ポリシーは，注入された breaking-event の強度でもっとも好戦的な国の行動をスケールする: `archduke` (最高強度) は宣戦布告し同盟国を巻き込む (開戦 + エスカレーション)，`dardanelles` (中間強度) は総動員のみ (冷戦・開戦なし)，`null` は平時 — これで論文の定性的 ordering を再現する．ローカル既定モデル (`llama3.2`) は論文の GPT-4 / Claude-2 と異なるため，再現忠実度は «傾向» (史実トリガーは開戦へ; null トリガーは冷戦 / 平時; 同盟 MI はランダムより高い) を目標とし，Table 2 の絶対値の一致は狙わない．
+
 ## 出力
 
 各 `run` は `results/{timestamp}/` を書き出す (`results/latest` シンボリックリンク付き):
@@ -82,6 +99,8 @@ uv run waragent-tools visualize-sweep
 
 `sweep` は `results/{timestamp}_sweep/` に `sweep_config.json` と `sweep_summary.csv` を書き出す．
 
+`reproduce` は `results/{timestamp}_reproduce/` に `reproduce_summary.json` (観測値 vs 論文値のアンカー) と，トリガー条件ごとのサブディレクトリ (`null/`, `dardanelles/`, `archduke-assassination/`) を書き出す．各サブディレクトリは `metrics.csv` / `events.csv` / `run_metadata.json` / `config.json` を持つ．Python の `reproduce` ツールはこれらを読み，`figures/table2_alliance_escalation.png` と `figures/table5_trigger_compare.png` を描画する．
+
 ## ドキュメント
 
 - [アーキテクチャ](docs/architecture.ja.md) ([English](docs/architecture.md))
@@ -90,9 +109,13 @@ uv run waragent-tools visualize-sweep
 
 ## スコープ
 
-- **Phase 1** (コアモデル: 国エージェント + Board + Board/Stick + イベントログ; 6 フェーズ上の 5 メカニズム; LLM 決定レイヤ + キャッシュ; WWI 基本 run) — 完了．
-- **Phase 2** (`sweep` トリガー × スタンス; `visualize` / `visualize-sweep` / `show-experiment-settings`) — 完了．
-- **Phase 3** (`reproduce` による Table 2–5 一括再現 + 反実仮想分析・WWII / 戦国時代シナリオ・脱匿名化) — 保留．拡張点を残してある: `Scenario` 列挙・設定可能な `secretary_passes`・`config.rs` の脱匿名化対応表 (A=Germany, B=Austria-Hungary, …)．
+- **コアモデル** — 国エージェント + per-country Board + Board/Stick 文脈 + イベントログ; 6 フェーズ上の 5 メカニズム; 永続プロンプトキャッシュ付きの LLM 決定レイヤ; 匿名化 WWI シナリオ (`wwi` 8 カ国・`wwi-small` 4 カ国)．
+- **`run`** — 単一設定 (シナリオ × トリガー × スタンス)．キャッシュにより cold→warm 100% ヒット率の再生が成立する．
+- **`sweep`** — トリガー × スタンスのグリッドを `sweep_summary.csv` に集約する．
+- **`reproduce`** — 論文の Table 2–5 ヘッドライン story を `null` / `dardanelles` / `archduke-assassination` のトリガー条件で再現し，観測値 vs 論文値のアンカーと図を出力する．`--mock` でオフライン検証可能．
+- **可視化** — `visualize` / `visualize-sweep` / `show-experiment-settings` / `reproduce`．
+
+モデルにはさらなる分析のための拡張点を残してある: `Scenario` 列挙 (WWII / 戦国時代用)・設定可能な `secretary_passes`・`config.rs` の脱匿名化対応表 (A=Germany, B=Austria-Hungary, …)．
 
 ## 参考文献
 

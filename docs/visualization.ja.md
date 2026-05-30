@@ -32,6 +32,19 @@ uv run waragent-tools visualize-sweep --sweep_dir results/20260524_160000_sweep
 
 注: `null` トリガーラベルは欠損値ではなく文字列として読む．
 
+## `reproduce`
+
+`results/{dir}_reproduce/reproduce_summary.json` とトリガー条件ごとの `metrics.csv` を読み，観測値 vs 論文値の Table 2–5 アンカー表を表示し，以下を書き出す:
+
+- `figures/table2_alliance_escalation.png` — トリガー別の `alliance_mi` と `n_conflicts` の時系列 (同盟分極化・エスカレーション)．
+- `figures/table5_trigger_compare.png` — トリガー別のクロス比較バー: 開戦 / 冷戦フラグと最終 同盟 MI．
+
+```bash
+uv run waragent-tools reproduce
+uv run waragent-tools reproduce --run --mock --quick   # 先に Rust バイナリを実行 (オフライン)
+uv run waragent-tools reproduce --json                 # サマリのみ表示
+```
+
 ## `show-experiment-settings`
 
 `config.json` (run) または `sweep_config.json` (sweep) に加え `run_metadata.json` (モデル / endpoint / 温度 / seed / cache-hit 率 / 開戦 / 冷戦) を整形表示する．`results/latest` も解決する．

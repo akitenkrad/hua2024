@@ -32,6 +32,19 @@ uv run waragent-tools visualize-sweep --sweep_dir results/20260524_160000_sweep
 
 Note: the `null` trigger label is read as the literal string (not parsed as a missing value).
 
+## `reproduce`
+
+Reads `results/{dir}_reproduce/reproduce_summary.json` and the per-trigger `metrics.csv` files, prints the observed-vs-paper Table 2–5 anchor table, and writes:
+
+- `figures/table2_alliance_escalation.png` — per-trigger `alliance_mi` and `n_conflicts` time series (alliance polarization and escalation).
+- `figures/table5_trigger_compare.png` — per-trigger cross-comparison bars: war-outbreak / cold-war flags and final alliance MI.
+
+```bash
+uv run waragent-tools reproduce
+uv run waragent-tools reproduce --run --mock --quick   # run the Rust binary first (offline)
+uv run waragent-tools reproduce --json                 # print the summary only
+```
+
 ## `show-experiment-settings`
 
 Pretty-prints `config.json` (run) or `sweep_config.json` (sweep) plus `run_metadata.json` (model / endpoint / temperature / seed / cache-hit rate / war-outbreak / cold-war). `results/latest` is resolved.
