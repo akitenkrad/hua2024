@@ -11,7 +11,7 @@ LLM 出力は socsim の bit 再現性の **外側** にある．本設計は二
 - **決定論的 socsim コア** — シナリオ/Board 初期化・活性化順・publicity に基づく伝播・同盟/宣戦/条約の解決・エスカレーション (同盟国の参戦)・Board と総動員の更新・全指標 (同盟相互情報量・宣戦/総動員 Jaccard・開戦判定・勃発ラウンド)．seed から bit 単位で再現する (`ctx.rng`, ChaCha20 `SimRng`)．
 - **非決定的 LLM レイヤ** — 単一の `Decision` メカニズム (`CountryDecisionMechanism`)．各国が 4 ステップ誘導推論 (同盟候補特定 → 敵対候補認識 → 推奨行動 → 最終行動) と秘書検証 (回数指定可) を実行する．`socsim-llm` の `CachingClient` (`hash(prompt+model)` → 応答キャッシュ)・`temperature=0`・固定 seed で擬似決定論化する．プロバイダ順は **Ollama 第一 → OpenAI フォールバック** (`FallbackClient`)．
 
-再現性の本体はモデルではなく **キャッシュ** である．ウォームキャッシュは同一応答を再生するため，再実行はコスト 0 かつ安定する．**1 ラウンドあたりの LLM 呼び出し回数 = 国数 × (1 + secretary_passes)**．`--secretary-passes` は既定 `1` で呼び出し予算を有界化する．各 run は `run_metadata.json` にモデル・endpoint・温度・seed・cache-hit 率を記録する．ローカル既定モデル (`llama3.2`) は論文の `GPT-4`/`Claude-2` と異なるため，再現忠実度は **中程度 (△〜○)**: «傾向» (戦争はおおむね勃発する; null トリガーは冷戦に留まる; 同盟 MI はランダムより高い) を目標とし，Table 2 の絶対値の一致は狙わない．
+再現性の本体はモデルではなく **キャッシュ** である．ウォームキャッシュは同一応答を再生するため，再実行はコスト 0 かつ安定する．**1 ラウンドあたりの LLM 呼び出し回数 = 国数 × (1 + secretary_passes)**．`--secretary-passes` は既定 `1` で呼び出し予算を有界化する．各 run はモデルと温度を runvault の `run.json` の `llm` ブロックに，呼び出し数と cache-hit を run スコープの指標に記録する．ローカル既定モデル (`llama3.2`) は論文の `GPT-4`/`Claude-2` と異なるため，再現忠実度は **中程度 (△〜○)**: «傾向» (戦争はおおむね勃発する; null トリガーは冷戦に留まる; 同盟 MI はランダムより高い) を目標とし，Table 2 の絶対値の一致は狙わない．
 
 > 本プロジェクトは LLM レイヤを `socsim-llm` クレットに統一し，`reqwest` / `sha2` は使わない (HTTP とプロンプトハッシュは socsim-llm が所有する)．設計書 §4.2/§7 を上書きし，li2024 / zhao2024 / ren2024 / gao2023 と統一する．
 
@@ -45,7 +45,7 @@ uv sync
 uv run waragent-tools visualize
 
 # 設定値と LLM メタデータの確認
-uv run waragent-tools show-experiment-settings --results-dir results/latest
+uv run waragent-tools show-experiment-settings
 ```
 
 ### オフライン (LLM 不要) スモーク
@@ -71,7 +71,7 @@ uv run waragent-tools visualize-sweep
 
 ### 論文の図表 (`reproduce`)
 
-`reproduce` は論文のヘッドライン Table 2–5 の story — トリガー強度に応じた開戦頻度・同盟エスカレーション・同盟分極化 — を 3 つのトリガー条件 (`null` / `dardanelles` / `archduke-assassination`) で軽量シナリオ `wwi-small` 上に走らせ，観測値 vs 論文値のアンカー (PASS/off) と figure 入力を `reproduce_summary.json` に集約する．`--mock` はトリガー感応な scripted 決定ポリシーで駆動するため，バンドル全体がライブ LLM 無しにオフラインで再現可能になる．`--quick` は各条件を 2 ラウンドに縮約する．
+`reproduce` は論文のヘッドライン Table 2–5 の story — トリガー強度に応じた開戦頻度・同盟エスカレーション・同盟分極化 — を 3 つのトリガー条件 (`null` / `dardanelles` / `archduke-assassination`) で軽量シナリオ `wwi-small` 上に走らせ，各条件を 1 つの `reproduce` 親 run の下の子 run として記録する (条件をまたいだ同盟分極化のギャップは親の `scope=sweep` 指標，観測値 vs 論文値のアンカーはコンソールに出る)．`--mock` はトリガー感応な scripted 決定ポリシーで駆動するため，バンドル全体がライブ LLM 無しにオフラインで再現可能になる．`--quick` は各条件を 2 ラウンドに縮約する．
 
 ```bash
 # オフライン検証経路 (ライブ LLM 不要): scripted mock・短縮ラウンド
@@ -88,18 +88,21 @@ mock ポリシーは，注入された breaking-event の強度でもっとも�
 
 ## 出力
 
-各 `run` は `results/{timestamp}/` を書き出す (`results/latest` シンボリックリンク付き):
+出力の置き場と同一性は [runvault](https://github.com/akitenkrad/rs-runvault) が持つ．サブコマンド 1 回が `results/waragent/<run_slug>/` の run ディレクトリ 1 本になる (掃引は親 1 本 + セルごとの子)．自前のタイムスタンプ付きディレクトリも `latest` シンボリックリンクも作らない．
 
 | ファイル | 内容 |
 |---|---|
-| `config.json` | 実行設定 |
-| `metrics.csv` | ラウンドごとの指標 (`alliance_mi`, `declaration_jaccard`, `mobilization_jaccard`, `n_conflicts`, `n_mobilized`, `n_alliance_clusters`, `war_outbreak`) |
-| `events.csv` | 行動ログ (`round, actor, action, target, publicity`) |
-| `run_metadata.json` | LLM モデル / endpoint / 温度 / seed / cache-hit 率 + マクロ帰結 |
+| `run.json` | run の同一性: lineage・RNG (`master_seed` / `replicate_index`)・`llm` ブロック・再現対象の論文 |
+| `config.json` | 実験条件 (`parameters` の下) |
+| `metrics.csv` | long 形式 (`run_uid,step,step_unit,scope,name,value`)．ラウンドごと: `alliance_mi`, `declaration_jaccard`, `mobilization_jaccard`, `n_conflicts`, `n_mobilized`, `n_alliance_clusters`, `war_outbreak` (`step_unit=round`, `scope=run`)．step を持たない行: `n_units`, `final_round`, `cold_war_flag`, `escalation_round` (勃発した run のみ), `llm_calls`, `llm_cache_hits`, `llm_cache_hit_rate` |
+| `events.jsonl` | 行動ログ．名前空間つきイベント `x.hua2024.action` (`unit_id`, `t`, `actor`, `action`, `target`, `publicity`) が 1 行動 1 行 |
+| `reference.csv` | 論文 Table 2 の報告値と出典 (`run` のみ) |
 
-`sweep` は `results/{timestamp}_sweep/` に `sweep_config.json` と `sweep_summary.csv` を書き出す．
+`sweep` は掃引の格子そのものを `parameters` に持つ `sweep` 親と，セルごとの `run` 子を書く．子は `lineage.parent_run_uid` で親を指す．旧 `sweep_summary.csv` は Python 側が子から組み直す．
 
-`reproduce` は `results/{timestamp}_reproduce/` に `reproduce_summary.json` (観測値 vs 論文値のアンカー) と，トリガー条件ごとのサブディレクトリ (`null/`, `dardanelles/`, `archduke-assassination/`) を書き出す．各サブディレクトリは `metrics.csv` / `events.csv` / `run_metadata.json` / `config.json` を持つ．Python の `reproduce` ツールはこれらを読み，`figures/table2_alliance_escalation.png` と `figures/table5_trigger_compare.png` を描画する．
+`reproduce` は `reproduce` 親とトリガー条件ごとの `run` 子を書く．親は条件をまたいだ同盟分極化のギャップを `scope=sweep` 指標として持ち，条件ごとの値はすべて子にある．Python の `reproduce` ツールはこれらを読み，run ディレクトリの隣 (`results/waragent/figures/<run_slug>/`) に `table2_alliance_escalation.png` と `table5_trigger_compare.png` を描画する．
+
+移行前に書かれた legacy な `results/<timestamp>/` もそのまま読める — `--results-dir` に直接渡せばよい．
 
 ## ドキュメント
 
@@ -111,8 +114,8 @@ mock ポリシーは，注入された breaking-event の強度でもっとも�
 
 - **コアモデル** — 国エージェント + per-country Board + Board/Stick 文脈 + イベントログ; 6 フェーズ上の 5 メカニズム; 永続プロンプトキャッシュ付きの LLM 決定レイヤ; 匿名化 WWI シナリオ (`wwi` 8 カ国・`wwi-small` 4 カ国)．
 - **`run`** — 単一設定 (シナリオ × トリガー × スタンス)．キャッシュにより cold→warm 100% ヒット率の再生が成立する．
-- **`sweep`** — トリガー × スタンスのグリッドを `sweep_summary.csv` に集約する．
-- **`reproduce`** — 論文の Table 2–5 ヘッドライン story を `null` / `dardanelles` / `archduke-assassination` のトリガー条件で再現し，観測値 vs 論文値のアンカーと図を出力する．`--mock` でオフライン検証可能．
+- **`sweep`** — トリガー × スタンスのグリッド．親 run 1 本 + セルごとの子 run．
+- **`reproduce`** — 論文の Table 2–5 ヘッドライン story を `null` / `dardanelles` / `archduke-assassination` のトリガー条件で再現する．条件ごとに子 run 1 本．アンカーはコンソール，図は Python 側．`--mock` でオフライン検証可能．
 - **可視化** — `visualize` / `visualize-sweep` / `show-experiment-settings` / `reproduce`．
 
 モデルにはさらなる分析のための拡張点を残してある: `Scenario` 列挙 (WWII / 戦国時代用)・設定可能な `secretary_passes`・`config.rs` の脱匿名化対応表 (A=Germany, B=Austria-Hungary, …)．

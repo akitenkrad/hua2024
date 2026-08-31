@@ -7,20 +7,23 @@
 //! - **上層 (非決定的 LLM レイヤ)**: [`crate::llm`] のキャッシュ付き
 //!   Ollama→OpenAI フォールバッククライアントに閉じ込め，`temperature=0`/`seed`
 //!   固定 + プロンプト→応答キャッシュで擬似決定論化する．モデル・endpoint・
-//!   温度・seed・cache-hit を `run_metadata.json` に記録する．
+//!   温度は `run.json` の `llm` ブロックへ，呼び出し数と cache-hit は run スコープ
+//!   の指標へ落ちる ([`crate::record`])．
+//!
+//! クライアントを内側で組む入口 (旧 `run`) は置かない — `llm` ブロックに書く
+//! モデル名と endpoint を知っているのはクライアントを組んだ側だけなので，
+//! 組み立ては `Run::start` より前 (呼び出し側) に置く．
 
 use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::rc::Rc;
-
-use serde::Serialize;
 
 use socsim_core::{derive_seed, SimClock, SimRng};
 use socsim_engine::{RandomActivationScheduler, SimulationBuilder};
 use socsim_llm::{LlmClient, MetadataCollector};
 
 use crate::config::{build_countries, Config};
-use crate::llm::{build_live_client, WarClient};
+use crate::llm::WarClient;
 use crate::mechanisms::{
     BoardUpdateMechanism, CountryDecisionMechanism, DiplomacyMechanism, EscalationMechanism,
     SharedClient, SharedMetadata, SharedMetrics, SituationMechanism,
@@ -81,17 +84,10 @@ pub fn init_world(cfg: &Config, _rng: &mut SimRng) -> WarWorld {
     }
 }
 
-/// シミュレーションを実行する (本番 LLM クライアントを構築して駆動)．
-pub fn run(cfg: &Config) -> std::result::Result<SimulationResult, String> {
-    let client =
-        build_live_client(&cfg.llm).map_err(|e| format!("LLM クライアント構築に失敗: {e}"))?;
-    run_with_client(cfg, client)
-}
-
 /// 与えられた [`WarClient`] でシミュレーションを実行する．
 ///
-/// 本番は [`build_live_client`] の結果を，テストは [`crate::llm::wrap_client`] で
-/// ラップした `mock::ScriptedClient` を渡す．
+/// 本番は [`crate::llm::build_live_client`] の結果を，テストは
+/// [`crate::llm::wrap_client`] でラップした `mock::ScriptedClient` を渡す．
 pub fn run_with_client(
     cfg: &Config,
     client: WarClient,
@@ -199,78 +195,6 @@ fn initial_clusters(cfg: &Config) -> usize {
         trigger_injected: false,
     };
     crate::metrics::alliance_partition(&tmp).len()
-}
-
-/// ラウンド指標を CSV に保存する．
-///
-/// 書き出し機構は `socsim_results::write_csv` に委譲する (各行を `serialize` し
-/// 先頭行にヘッダを書く csv クレットの標準挙動; 従来の手書き writer とバイト等価)．
-/// 行構造体 [`RoundMetric`] は repo 固有のままで，writer だけを共有化する．
-pub fn save_metrics(metrics: &[RoundMetric], output_dir: &str) {
-    let path = format!("{}/metrics.csv", output_dir);
-    socsim_results::write_csv(metrics, &path).expect("metrics.csv の書き込みに失敗");
-}
-
-/// 行動イベントログを CSV に保存する．
-///
-/// `save_metrics` と同様 `socsim_results::write_csv` に委譲する (バイト等価)．
-pub fn save_events(events: &[Event], output_dir: &str) {
-    let path = format!("{}/events.csv", output_dir);
-    socsim_results::write_csv(events, &path).expect("events.csv の書き込みに失敗");
-}
-
-/// `run_metadata.json` の構造体 (LLM モデル・endpoint・温度・seed・cache 統計)．
-#[derive(Serialize)]
-pub struct RunMetadataJson {
-    pub llm_model: String,
-    pub llm_endpoint: String,
-    pub llm_temperature: f32,
-    pub llm_seed: u64,
-    pub total_calls: usize,
-    pub cache_hits: usize,
-    pub cache_hit_rate: f64,
-    pub war_outbreak: bool,
-    pub escalation_round: Option<u64>,
-    pub n_conflicts: u64,
-    pub cold_war_flag: bool,
-    pub determinism_note: &'static str,
-}
-
-/// `run_metadata.json` を保存する．
-pub fn save_run_metadata(result: &SimulationResult, cfg: &Config, output_dir: &str) {
-    let meta = RunMetadataJson {
-        llm_model: result.llm_model.clone(),
-        llm_endpoint: result.llm_endpoint.clone(),
-        llm_temperature: cfg.llm.temperature,
-        llm_seed: cfg.llm.seed,
-        total_calls: result.metadata.total(),
-        cache_hits: result.metadata.cache_hits(),
-        cache_hit_rate: result.metadata.cache_hit_rate(),
-        war_outbreak: result.war_outbreak,
-        escalation_round: result.escalation_round,
-        n_conflicts: result.n_conflicts,
-        cold_war_flag: result.cold_war_flag,
-        determinism_note: "LLM output is outside socsim bit-reproducibility; the prompt->response \
-                           cache (with temperature=0 and fixed seed) is the reproducibility \
-                           mechanism. The socsim core (scenario/board init, activation order, \
-                           publicity propagation, alliance/war resolution, escalation, board \
-                           updates and all metrics) is deterministic given the seed. LLM calls \
-                           per round = n_countries * (1 + secretary_passes).",
-    };
-    // pretty-print JSON の書き出しは socsim_results::write_json に委譲する
-    // (内部は serde_json::to_writer_pretty + flush; 従来の writer とバイト等価)．
-    // model/endpoint/temperature/seed や開戦・冷戦フラグの値は従来どおり
-    // result / cfg から採り，RunMetadataJson の構造 (フィールド名・順序・
-    // determinism_note・waragent 固有フィールド) を保持する (`MetadataCollector::
-    // summary()` は cache-hit 100% 再実行や呼び出し 0 件で endpoint/model が
-    // 変わりうるため，バイト等価のためここでは使わない)．
-    let path = format!("{}/run_metadata.json", output_dir);
-    socsim_results::write_json(&meta, &path).expect("run_metadata.json の書き込みに失敗");
-}
-
-/// 出力ディレクトリを作成する．
-pub fn ensure_output_dir(output_dir: &str) {
-    socsim_results::ensure_dir(output_dir).expect("出力ディレクトリの作成に失敗");
 }
 
 #[cfg(test)]

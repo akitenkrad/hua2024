@@ -152,9 +152,10 @@ pub struct Config {
     /// 乱数シード (None ならランダム; socsim コア層のみ支配)．
     pub seed: Option<u64>,
     /// LLM レイヤ設定．
+    ///
+    /// 出力の置き場は持たない — run ディレクトリの作成と命名は runvault の
+    /// `Run::start` が行い，run ディレクトリが出力先そのものになる．
     pub llm: LlmSettings,
-    /// 結果出力ディレクトリ．
-    pub output_dir: String,
 }
 
 impl Default for Config {
@@ -168,7 +169,6 @@ impl Default for Config {
             war_threshold: 3,
             seed: Some(42),
             llm: LlmSettings::default(),
-            output_dir: "results".to_string(),
         }
     }
 }
@@ -178,10 +178,13 @@ pub fn derive_run_seed(base: u64, run_idx: usize) -> u64 {
     socsim_core::derive_seed(base, &[run_idx as u64])
 }
 
-/// `config.json` (run 用) のシリアライズ表現．
+/// `config.json` の `parameters` に載る «結果を決める値» の表現．
+///
+/// どのサブコマンドの実行かは `run.json` の `subcommand` が持ち，出力先は run
+/// ディレクトリそのものなので，旧 `config.json` の `command` / `output_dir` は
+/// 持たない (どちらも結果を決めない)．
 #[derive(Serialize)]
 pub struct RunConfigJson {
-    pub command: &'static str,
     pub scenario: String,
     pub trigger: String,
     pub stance_override: Option<String>,
@@ -192,14 +195,12 @@ pub struct RunConfigJson {
     pub seed: Option<u64>,
     pub llm_temperature: f32,
     pub llm_seed: u64,
-    pub output_dir: String,
 }
 
 impl Config {
     /// `config.json` 用の表現を組み立てる．
     pub fn to_run_config_json(&self) -> RunConfigJson {
         RunConfigJson {
-            command: "run",
             scenario: self.scenario.label().to_string(),
             trigger: self.trigger.label().to_string(),
             stance_override: self.stance_override.map(|s| s.label().to_string()),
@@ -210,7 +211,6 @@ impl Config {
             seed: self.seed,
             llm_temperature: self.llm.temperature,
             llm_seed: self.llm.seed,
-            output_dir: self.output_dir.clone(),
         }
     }
 }

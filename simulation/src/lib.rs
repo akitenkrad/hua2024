@@ -33,5 +33,6 @@ pub mod llm;
 pub mod mechanisms;
 pub mod metrics;
 pub mod prompts;
+pub mod record;
 pub mod simulation;
 pub mod world;

@@ -11,7 +11,7 @@ LLM output is **outside** socsim's bit-reproducibility. The design therefore spl
 - **Deterministic socsim core** — scenario/board initialisation, activation order, publicity-based propagation, alliance/war/treaty resolution, escalation (allies joining a war), board & mobilization updates, and all metrics (alliance mutual information, declaration/mobilization Jaccard, war-outbreak, escalation round). Given a seed this reproduces bit-for-bit (`ctx.rng`, ChaCha20 `SimRng`).
 - **Non-deterministic LLM layer** — the single `Decision` mechanism (`CountryDecisionMechanism`): each country runs a four-step guided reasoning (identify allies → recognize adversaries → recommend action → final action) plus a configurable secretary verification pass. Pseudo-determinised by `socsim-llm`'s `CachingClient` (a `hash(prompt+model)` → response cache), `temperature=0` and a fixed seed. The provider order is **Ollama first → OpenAI fallback** via `socsim-llm`'s `FallbackClient`.
 
-The cache — not the model — is the reproducibility mechanism: a warm cache replays identical responses, so a rerun is free and stable. **LLM calls per round = n_countries × (1 + secretary_passes)**; `--secretary-passes` defaults to `1` to bound the call budget. Each run writes `run_metadata.json` recording the model, endpoint, temperature, seed and cache-hit rate. Because the local default model (`llama3.2`) differs from the paper's `GPT-4`/`Claude-2`, reproduction fidelity is **moderate (△–○)**: target the *trends* (war tends to break out; a null trigger stays in a cold-war state; alliance MI is above random) rather than the exact Table-2 percentages.
+The cache — not the model — is the reproducibility mechanism: a warm cache replays identical responses, so a rerun is free and stable. **LLM calls per round = n_countries × (1 + secretary_passes)**; `--secretary-passes` defaults to `1` to bound the call budget. Each run records the model and temperature in the `llm` block of runvault's `run.json`, and the call count and cache hits as run-scope metrics. Because the local default model (`llama3.2`) differs from the paper's `GPT-4`/`Claude-2`, reproduction fidelity is **moderate (△–○)**: target the *trends* (war tends to break out; a null trigger stays in a cold-war state; alliance MI is above random) rather than the exact Table-2 percentages.
 
 > This project standardises on the `socsim-llm` crate for the LLM layer; it does **not** use `reqwest` or `sha2` (socsim-llm owns the HTTP transport and the prompt-cache hashing), superseding design §4.2/§7 and matching li2024 / zhao2024 / ren2024 / gao2023.
 
@@ -45,7 +45,7 @@ uv sync
 uv run waragent-tools visualize
 
 # Inspect the run's settings and LLM metadata
-uv run waragent-tools show-experiment-settings --results-dir results/latest
+uv run waragent-tools show-experiment-settings
 ```
 
 ### Offline (no-LLM) smoke
@@ -71,7 +71,7 @@ uv run waragent-tools visualize-sweep
 
 ### Paper figures/tables (`reproduce`)
 
-`reproduce` runs the paper's headline Table 2–5 story — trigger-intensity-dependent war-outbreak frequency, alliance escalation, and alliance polarization — over three trigger conditions (`null` / `dardanelles` / `archduke-assassination`) on the light `wwi-small` scenario, and aggregates observed-vs-paper anchors (PASS/off) plus figure inputs into `reproduce_summary.json`. `--mock` drives a scripted, trigger-sensitive decision policy so the whole bundle is reproducible offline with no live LLM; `--quick` shortens each condition to 2 rounds.
+`reproduce` runs the paper's headline Table 2–5 story — trigger-intensity-dependent war-outbreak frequency, alliance escalation, and alliance polarization — over three trigger conditions (`null` / `dardanelles` / `archduke-assassination`) on the light `wwi-small` scenario, and records each condition as a child run under one `reproduce` parent (the cross-condition alliance-polarization gap is a `scope=sweep` metric on the parent; the observed-vs-paper anchors are printed to the console). `--mock` drives a scripted, trigger-sensitive decision policy so the whole bundle is reproducible offline with no live LLM; `--quick` shortens each condition to 2 rounds.
 
 ```bash
 # Offline-verifiable path (no live LLM): scripted mock, short rounds
@@ -88,18 +88,21 @@ The mock policy scales the most belligerent country's behavior by the injected b
 
 ## Outputs
 
-Each `run` writes `results/{timestamp}/` (with `results/latest` symlink):
+Where the output goes and how it is named belongs to [runvault](https://github.com/akitenkrad/rs-runvault): each subcommand invocation becomes one run directory under `results/waragent/<run_slug>/` (a sweep is one parent plus one child per cell). There is no timestamped directory of our own and no `latest` symlink.
 
 | File | Contents |
 |---|---|
-| `config.json` | the run configuration |
-| `metrics.csv` | per-round metrics (`alliance_mi`, `declaration_jaccard`, `mobilization_jaccard`, `n_conflicts`, `n_mobilized`, `n_alliance_clusters`, `war_outbreak`) |
-| `events.csv` | action log (`round, actor, action, target, publicity`) |
-| `run_metadata.json` | LLM model / endpoint / temperature / seed / cache-hit rate + macro outcomes |
+| `run.json` | run identity: lineage, RNG (`master_seed` / `replicate_index`), the `llm` block, and the paper this reproduces |
+| `config.json` | the conditions, under `parameters` |
+| `metrics.csv` | long form (`run_uid,step,step_unit,scope,name,value`). Per-round: `alliance_mi`, `declaration_jaccard`, `mobilization_jaccard`, `n_conflicts`, `n_mobilized`, `n_alliance_clusters`, `war_outbreak` (`step_unit=round`, `scope=run`). Without a step: `n_units`, `final_round`, `cold_war_flag`, `escalation_round` (only when war broke out), `llm_calls`, `llm_cache_hits`, `llm_cache_hit_rate` |
+| `events.jsonl` | the action log as `x.hua2024.action` events (`unit_id`, `t`, `actor`, `action`, `target`, `publicity`) — one line per action |
+| `reference.csv` | the paper's Table 2 values with their source (`run` only) |
 
-A `sweep` writes `results/{timestamp}_sweep/` with `sweep_config.json` and `sweep_summary.csv`.
+A `sweep` writes a `sweep` parent (the grid itself in `parameters`) plus one `run` child per cell, each child pointing at the parent through `lineage.parent_run_uid`. The old `sweep_summary.csv` is rebuilt from the children by the Python tools.
 
-A `reproduce` writes `results/{timestamp}_reproduce/` with `reproduce_summary.json` (observed-vs-paper anchors) and one subdirectory per trigger condition (`null/`, `dardanelles/`, `archduke-assassination/`), each holding `metrics.csv` / `events.csv` / `run_metadata.json` / `config.json`. The Python `reproduce` tool reads these and renders `figures/table2_alliance_escalation.png` and `figures/table5_trigger_compare.png`.
+A `reproduce` writes a `reproduce` parent plus one `run` child per trigger condition. The parent holds the cross-condition alliance-polarization gap as a `scope=sweep` metric; every per-condition number lives in its child. The Python `reproduce` tool reads them and renders `table2_alliance_escalation.png` and `table5_trigger_compare.png` next to the run directory (`results/waragent/figures/<run_slug>/`).
+
+Legacy `results/<timestamp>/` directories written before the migration are still readable — pass them to `--results-dir`.
 
 ## Documentation
 
@@ -111,8 +114,8 @@ A `reproduce` writes `results/{timestamp}_reproduce/` with `reproduce_summary.js
 
 - **Core model** — country agents + per-country boards + Board/Stick context + event log; five mechanisms over six phases; an LLM decision layer with a persistent prompt cache; the anonymized WWI scenario (`wwi` 8 countries, `wwi-small` 4 countries).
 - **`run`** — a single configuration (scenario × trigger × stance), with the cache giving cold→warm 100% hit-rate replay.
-- **`sweep`** — a trigger × stance grid aggregated into `sweep_summary.csv`.
-- **`reproduce`** — the paper's Table 2–5 headline story across the `null` / `dardanelles` / `archduke-assassination` trigger conditions, with observed-vs-paper anchors and figures; offline-verifiable via `--mock`.
+- **`sweep`** — a trigger × stance grid: one parent run plus one child run per cell.
+- **`reproduce`** — the paper's Table 2–5 headline story across the `null` / `dardanelles` / `archduke-assassination` trigger conditions, one child run per condition, with anchors on the console and figures; offline-verifiable via `--mock`.
 - **Visualization** — `visualize` / `visualize-sweep` / `show-experiment-settings` / `reproduce`.
 
 The model carries extension points for further analyses: the `Scenario` enum (for WWII / Warring-States), configurable `secretary_passes`, and the de-anonymization map (A=Germany, B=Austria-Hungary, …) documented in `config.rs`.

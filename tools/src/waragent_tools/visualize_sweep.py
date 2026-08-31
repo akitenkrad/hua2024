@@ -9,9 +9,16 @@ results/latest (または --sweep_dir 指定先) の sweep_summary.csv を読み
 (3) トリガー別の開戦率・冷戦率の棒グラフ
 を生成する (微小トリガーでも冷戦/開戦に至る傾向の確認)．
 
+runvault は掃引の表をディスクに持たない (旧 `sweep_summary.csv` はもう書かない)
+ので，親の子 run から組み直す．どの掃引を見るかは `--sweep-dir` を省略すれば
+`runvault path --experiment waragent --latest --subcommand sweep` が答える．
+legacy の `results/<timestamp>_sweep/` は `--sweep-dir` に直接渡せば従来どおり読める．
+
+図は run ディレクトリの *隣* (`results/waragent/figures/<run_slug>/`) に置く．
+
 Usage:
     uv run waragent-tools visualize-sweep
-    uv run waragent-tools visualize-sweep --sweep_dir results/20260524_160000_sweep
+    uv run waragent-tools visualize-sweep --sweep-dir "$(runvault path --experiment waragent --latest --subcommand sweep)"
 
 Outputs:
     output_dir/
@@ -28,6 +35,9 @@ import os
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
+from runvault.read import figures_dir
+
+from waragent_tools.runs import resolve_run_dir, sweep_table
 
 plt.rcParams["font.family"] = "Hiragino Sans"
 
@@ -35,17 +45,8 @@ COLOR_BG = "#FAFAF8"
 
 
 def load_summary(sweep_dir: str) -> pd.DataFrame:
-    path = os.path.join(sweep_dir, "sweep_summary.csv")
-    if not os.path.exists(path):
-        raise FileNotFoundError(f"sweep_summary.csv が見つかりません: {path}")
-    # トリガーラベル "null" は pandas が NaN と誤解釈するため，trigger 列だけ
-    # 既定 NA 変換を無効化して文字列のまま読む (escalation_round 等の空欄 NaN は維持)．
-    df = pd.read_csv(path)
-    raw = pd.read_csv(path, keep_default_na=False, dtype=str)
-    for col in ("trigger", "stance", "scenario"):
-        if col in raw.columns:
-            df[col] = raw[col]
-    return df
+    """1 行 1 実行の掃引サマリ表 (子 run から組み直す; legacy CSV があればそちら)．"""
+    return sweep_table(sweep_dir)
 
 
 def _heatmap(df: pd.DataFrame, value: str, agg: str, title: str, out_path: str, vmax: float = 1.0) -> None:
@@ -117,14 +118,20 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument(
         "--sweep_dir",
         "--sweep-dir",
-        default="results/latest",
-        help="スイープ出力ディレクトリ (default: results/latest)",
+        default=None,
+        help="掃引親 run のディレクトリ (省略時は runvault path --latest が解決する)",
+    )
+    p.add_argument(
+        "--results_root",
+        "--results-root",
+        default="results",
+        help="runvault の results root (default: results)",
     )
     p.add_argument(
         "--output_dir",
         "--output-dir",
         default=None,
-        help="図の保存先ディレクトリ (default: {sweep_dir}/figures)",
+        help="図の保存先ディレクトリ (default: results/waragent/figures/<run_slug>/)",
     )
     return p.parse_args(argv)
 
@@ -132,16 +139,19 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 def main(argv: list[str] | None = None) -> None:
     args = parse_args(argv)
 
-    out_dir = args.output_dir if args.output_dir else os.path.join(args.sweep_dir, "figures")
+    sweep_dir = resolve_run_dir(
+        args.sweep_dir, args.results_root, subcommand="sweep", standalone=False
+    )
+    out_dir = args.output_dir if args.output_dir else figures_dir(sweep_dir)
     os.makedirs(out_dir, exist_ok=True)
 
     print("=== Hua et al. (2024) WarAgent スイープ可視化 ===")
-    print(f"スイープ: {args.sweep_dir}")
+    print(f"スイープ: {sweep_dir}")
     print(f"出力先:   {out_dir}")
     print("-------------------------------------------------")
 
-    print("[1/3] sweep_summary.csv を読み込み中 ...")
-    df = load_summary(args.sweep_dir)
+    print("[1/3] 子 run から掃引サマリを組み直し中 ...")
+    df = load_summary(sweep_dir)
     print(
         f"      トリガー {df['trigger'].nunique()} 種 × スタンス {df['stance'].nunique()} 種 "
         f"(計 {len(df)} 実行)"

@@ -1,14 +1,20 @@
 #!/usr/bin/env python3
 """reproduce_paper.py — Hua et al. (2024) WarAgent 論文 Table 2-5 ヘッドライン指標 一括再現レポート．
 
-Rust の `waragent reproduce` が書き出す `reproduce_summary.json` (3 トリガー条件
-null / dardanelles / archduke の開戦・エスカレーション・同盟分極化と，Table 2-5 の
-headline story に対する PASS/off アンカー) を読み，論文の headline 結果を再現する:
+`waragent reproduce` の親 run とその子 run を読み，論文の headline 結果を再現する:
 
   - Table 2 (alliance escalation) : 各トリガー条件の同盟 MI / 紛争数の時系列．
   - Table 3 (cold war)            : 中間強度トリガーで «開戦せず緊張のみ» になる過程．
   - Table 4 (escalation dynamics) : 史実トリガーで同盟国が参戦し紛争対が増える過程．
   - Table 5 (counterfactual)      : トリガー条件別の開戦/冷戦/MI のクロス比較バー．
+
+トリガー条件ごとの値は子 run (`metrics.csv`) が，条件をまたいだ同盟分極化のギャップ
+は親の `scope=sweep` 指標が持つ (旧 `reproduce_summary.json` は書かない — 同じ値が
+run ディレクトリの中にある)．
+
+アンカーの帯と PASS/OFF はここでは出さない．帯は論文の主張ではなくこの再現実装が
+置いたものなので Rust 側のコンソールにだけ残す — 同じ閾値を Python と Rust の
+2 箇所に置くと食い違う余地ができる．
 
 `--run` を付けると先に Rust バイナリ (`waragent reproduce`) を実行して最新結果を作る．
 `--mock` / `--quick` はそのまま Rust バイナリへ渡す (オフライン・短縮再現)．
@@ -16,11 +22,11 @@ headline story に対する PASS/off アンカー) を読み，論文の headlin
 Usage:
     waragent-tools reproduce
     waragent-tools reproduce --run --mock --quick
-    waragent-tools reproduce --results-dir results/20260530_000000_reproduce
+    waragent-tools reproduce --results-dir "$(runvault path --experiment waragent --latest --subcommand reproduce)"
     waragent-tools reproduce --json
 
 Outputs:
-    <results_dir>/figures/
+    results/waragent/figures/<run_slug>/
     ├── table2_alliance_escalation.png   ← トリガー別 同盟 MI / 紛争数 の時系列
     └── table5_trigger_compare.png       ← トリガー別 開戦/冷戦/最終 MI のクロス比較
 """
@@ -35,8 +41,9 @@ from pathlib import Path
 
 import matplotlib.pyplot as plt
 import pandas as pd
+from runvault.read import config_parameters, figures_dir, sweep_children
 
-from socsim_tools.io import resolve_results_dir
+from waragent_tools.runs import load_metrics, resolve_run_dir, run_scope
 
 # --------------------------------------------------------------------------- #
 # 日本語フォント・カラー設定 (visualize.py と統一)．
@@ -44,8 +51,6 @@ from socsim_tools.io import resolve_results_dir
 plt.rcParams["font.family"] = "Hiragino Sans"
 
 COLOR_BG = "#FAFAF8"
-COLOR_MI = "#2196F3"
-COLOR_CONFLICT = "#F44336"
 COLOR_OUTBREAK = "#C62828"
 COLOR_COLDWAR = "#FF9800"
 TRIGGER_COLORS = {
@@ -54,6 +59,9 @@ TRIGGER_COLORS = {
     "dardanelles": "#FF9800",
     "archduke-assassination": "#C62828",
 }
+
+# 論文が示す «トリガー強度の順序» に合わせた表示順．
+TRIGGER_ORDER = ["null", "naval-incident", "dardanelles", "archduke-assassination"]
 
 
 def _run_binary(seed: int, mock: bool, quick: bool) -> None:
@@ -67,30 +75,43 @@ def _run_binary(seed: int, mock: bool, quick: bool) -> None:
     subprocess.run(cmd, check=True)
 
 
-def _load_summary(results_dir: Path) -> dict:
-    path = results_dir / "reproduce_summary.json"
-    if not path.exists():
-        raise FileNotFoundError(
-            f"reproduce_summary.json が見つかりません: {path}\n"
-            f"  先に `waragent-tools reproduce --run` を実行してください．"
+def load_conditions(parent_dir: str) -> list[dict]:
+    """トリガー条件ごとの観測を子 run から組み直す (旧 `scenarios` に対応)．"""
+    rows: list[dict] = []
+    for child in sweep_children(parent_dir):
+        params = config_parameters(child) or {}
+        scope = run_scope(child)
+        steps = load_metrics(child)
+        last = steps.iloc[-1]
+        rows.append(
+            {
+                "trigger": params.get("trigger"),
+                "war_outbreak": int(last["war_outbreak"]),
+                "cold_war_flag": int(scope["cold_war_flag"]),
+                # 勃発しなかった run には行そのものが無い (0 で埋めない)．
+                "escalation_round": scope.get("escalation_round"),
+                "n_conflicts": int(last["n_conflicts"]),
+                "final_alliance_mi": float(last["alliance_mi"]),
+                "final_declaration_jaccard": float(last["declaration_jaccard"]),
+                "final_mobilization_jaccard": float(last["mobilization_jaccard"]),
+                "final_round": int(scope["final_round"]),
+                "run_dir": child,
+                "metrics": steps,
+            }
         )
-    with path.open(encoding="utf-8") as f:
-        return json.load(f)
+    if not rows:
+        raise SystemExit(
+            f"エラー: この reproduce 親に子 run がありません: {parent_dir}\n"
+            "  先に `waragent-tools reproduce --run --mock --quick` を実行してください．"
+        )
+    order = {t: i for i, t in enumerate(TRIGGER_ORDER)}
+    rows.sort(key=lambda r: order.get(r["trigger"], len(order)))
+    return rows
 
 
-def _load_metrics(results_dir: Path, subdir: str) -> pd.DataFrame:
-    """トリガー条件サブディレクトリの metrics.csv を読む．"""
-    return pd.read_csv(results_dir / subdir / "metrics.csv")
-
-
-def _save_alliance_escalation(
-    metrics_by_trigger: dict[str, pd.DataFrame],
-    out_path: Path,
-) -> None:
+def _save_alliance_escalation(conditions: list[dict], out_path: Path) -> None:
     """トリガー別の 同盟 MI / 紛争数 の時系列 (Table 2/4 風)．"""
-    fig, (ax_mi, ax_conf) = plt.subplots(
-        1, 2, figsize=(13, 5), facecolor=COLOR_BG
-    )
+    fig, (ax_mi, ax_conf) = plt.subplots(1, 2, figsize=(13, 5), facecolor=COLOR_BG)
     fig.suptitle(
         "Hua et al. (2024) WarAgent — Table 2/4: トリガー別 同盟分極化・エスカレーション",
         fontsize=14,
@@ -101,13 +122,14 @@ def _save_alliance_escalation(
         ax.grid(True, alpha=0.3)
         ax.set_xlabel("ラウンド t")
 
-    for trigger, metrics in metrics_by_trigger.items():
-        color = TRIGGER_COLORS.get(trigger, "#777777")
+    for c in conditions:
+        color = TRIGGER_COLORS.get(c["trigger"], "#777777")
+        metrics: pd.DataFrame = c["metrics"]
         ax_mi.plot(
-            metrics["round"], metrics["alliance_mi"], color=color, lw=2.0, label=trigger
+            metrics["round"], metrics["alliance_mi"], color=color, lw=2.0, label=c["trigger"]
         )
         ax_conf.plot(
-            metrics["round"], metrics["n_conflicts"], color=color, lw=2.0, label=trigger
+            metrics["round"], metrics["n_conflicts"], color=color, lw=2.0, label=c["trigger"]
         )
 
     ax_mi.set_ylabel("同盟分割 MI (vs 史実)")
@@ -125,15 +147,12 @@ def _save_alliance_escalation(
     print(f"  保存: {out_path}")
 
 
-def _save_trigger_compare(summary: dict, out_path: Path) -> None:
+def _save_trigger_compare(conditions: list[dict], out_path: Path) -> None:
     """トリガー別の 開戦/冷戦/最終 MI のクロス比較バー (Table 3/5 風)．"""
-    scenarios = summary.get("scenarios", [])
-    triggers = [s["trigger"] for s in scenarios]
+    triggers = [c["trigger"] for c in conditions]
     x = range(len(triggers))
 
-    fig, (ax_flag, ax_mi) = plt.subplots(
-        1, 2, figsize=(13, 5), facecolor=COLOR_BG
-    )
+    fig, (ax_flag, ax_mi) = plt.subplots(1, 2, figsize=(13, 5), facecolor=COLOR_BG)
     fig.suptitle(
         "Hua et al. (2024) WarAgent — Table 3/5: トリガー条件別 開戦/冷戦/同盟分極化",
         fontsize=14,
@@ -143,14 +162,14 @@ def _save_trigger_compare(summary: dict, out_path: Path) -> None:
     ax_flag.set_facecolor(COLOR_BG)
     ax_flag.bar(
         [i - width / 2 for i in x],
-        [s["war_outbreak"] for s in scenarios],
+        [c["war_outbreak"] for c in conditions],
         width=width,
         color=COLOR_OUTBREAK,
         label="開戦 (war_outbreak)",
     )
     ax_flag.bar(
         [i + width / 2 for i in x],
-        [s["cold_war_flag"] for s in scenarios],
+        [c["cold_war_flag"] for c in conditions],
         width=width,
         color=COLOR_COLDWAR,
         label="冷戦 (cold_war)",
@@ -166,7 +185,7 @@ def _save_trigger_compare(summary: dict, out_path: Path) -> None:
     ax_mi.set_facecolor(COLOR_BG)
     ax_mi.bar(
         list(x),
-        [s["final_alliance_mi"] for s in scenarios],
+        [c["final_alliance_mi"] for c in conditions],
         color=[TRIGGER_COLORS.get(t, "#777777") for t in triggers],
     )
     ax_mi.set_xticks(list(x))
@@ -182,38 +201,26 @@ def _save_trigger_compare(summary: dict, out_path: Path) -> None:
     print(f"  保存: {out_path}")
 
 
-def _print_table(summary: dict) -> None:
+def _print_table(params: dict, conditions: list[dict], sweep: dict) -> None:
     print("=" * 78)
     print("Hua et al. (2024) WarAgent — Table 2-5 再現レポート")
-    print(f"  paper    : {summary.get('paper', '')}")
     print(
-        f"  scenario : {summary.get('scenario', '')} | "
-        f"mock={summary['mock']} quick={summary['quick']}"
+        f"  scenario : {params.get('scenario', '')} | "
+        f"mock={params.get('mock')} rounds={params.get('rounds')}"
     )
     print("=" * 78)
-    for s in summary.get("scenarios", []):
-        esc = s["escalation_round"] if s["escalation_round"] >= 0 else "なし"
+    for c in conditions:
+        esc = "なし" if c["escalation_round"] is None else int(c["escalation_round"])
         print(
-            f"  [{s['trigger']:<22}] 開戦={s['war_outbreak']} 冷戦={s['cold_war_flag']} "
-            f"勃発R={esc} 紛争={s['n_conflicts']} "
-            f"MI={s['final_alliance_mi']:.3f} 宣戦J={s['final_declaration_jaccard']:.3f} "
-            f"総動員J={s['final_mobilization_jaccard']:.3f} (round {s['final_round']})"
+            f"  [{c['trigger']:<22}] 開戦={c['war_outbreak']} 冷戦={c['cold_war_flag']} "
+            f"勃発R={esc} 紛争={c['n_conflicts']} "
+            f"MI={c['final_alliance_mi']:.3f} 宣戦J={c['final_declaration_jaccard']:.3f} "
+            f"総動員J={c['final_mobilization_jaccard']:.3f} (round {c['final_round']})"
         )
     print("-" * 78)
-    n_pass = 0
-    for a in summary.get("anchors", []):
-        hi = a["target_hi"]
-        hi_str = "∞" if hi is None or hi == float("inf") or hi > 1e30 else f"{hi:.2f}"
-        status = "PASS" if a["pass"] else "OFF "
-        if a["pass"]:
-            n_pass += 1
-        print(
-            f"[{status}] {a['name']:<52} "
-            f"obs={a['observed']:.4f} target=[{a['target_lo']:.2f},{hi_str}] "
-            f"paper={a['paper_value']}"
-        )
-    print("-" * 78)
-    print(f"{n_pass}/{len(summary.get('anchors', []))} アンカーが in-band")
+    gap = sweep.get("alliance_mi_gap_archduke_minus_null")
+    if gap is not None:
+        print(f"  同盟分極化のギャップ (archduke − null): {gap:+.4f}")
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -224,10 +231,16 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument("--results-dir", "--results_dir", default=None)
     parser.add_argument(
+        "--results-root",
+        "--results_root",
+        default="results",
+        help="runvault の results root (default: results)",
+    )
+    parser.add_argument(
         "--output-dir",
         "--output_dir",
         default=None,
-        help="図の保存先 (既定: <results>/figures)",
+        help="図の保存先 (既定: results/waragent/figures/<run_slug>/)",
     )
     parser.add_argument(
         "--run", action="store_true", help="先に Rust バイナリ (waragent reproduce) を実行する．"
@@ -235,9 +248,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--mock", action="store_true", help="--run 時に scripted mock を使う (オフライン)．"
     )
-    parser.add_argument(
-        "--quick", action="store_true", help="--run 時に短縮再現 (rounds=2)．"
-    )
+    parser.add_argument("--quick", action="store_true", help="--run 時に短縮再現 (rounds=2)．")
     parser.add_argument("--seed", type=int, default=42, help="--run 時のシード基点．")
     parser.add_argument(
         "--json", action="store_true", help="サマリを JSON で出力する (図は生成しない)．"
@@ -247,38 +258,34 @@ def main(argv: list[str] | None = None) -> int:
     if args.run:
         _run_binary(args.seed, args.mock, args.quick)
 
-    results_dir = resolve_results_dir(args.results_dir)
-    try:
-        summary = _load_summary(results_dir)
-    except FileNotFoundError as exc:
-        print(f"エラー: {exc}", file=sys.stderr)
-        return 1
+    parent = resolve_run_dir(
+        args.results_dir, args.results_root, subcommand="reproduce", standalone=False
+    )
+    params = config_parameters(parent) or {}
+    sweep = run_scope(parent)
+    conditions = load_conditions(parent)
 
     if args.json:
-        print(json.dumps(summary, indent=2, ensure_ascii=False))
+        payload = {
+            "parent": parent,
+            "parameters": params,
+            "sweep_metrics": sweep,
+            "conditions": [
+                {k: v for k, v in c.items() if k != "metrics"} for c in conditions
+            ],
+        }
+        print(json.dumps(payload, indent=2, ensure_ascii=False))
         return 0
 
-    _print_table(summary)
+    _print_table(params, conditions, sweep)
 
-    out_dir = Path(args.output_dir) if args.output_dir else results_dir / "figures"
+    out_dir = Path(args.output_dir) if args.output_dir else Path(figures_dir(parent))
     out_dir.mkdir(parents=True, exist_ok=True)
     print("-" * 78)
     print(f"図の出力先: {out_dir}")
 
-    metrics_by_trigger: dict[str, pd.DataFrame] = {}
-    for s in summary.get("scenarios", []):
-        try:
-            metrics_by_trigger[s["trigger"]] = _load_metrics(
-                results_dir, s["results_subdir"]
-            )
-        except FileNotFoundError:
-            continue
-
-    if metrics_by_trigger:
-        _save_alliance_escalation(
-            metrics_by_trigger, out_dir / "table2_alliance_escalation.png"
-        )
-    _save_trigger_compare(summary, out_dir / "table5_trigger_compare.png")
+    _save_alliance_escalation(conditions, out_dir / "table2_alliance_escalation.png")
+    _save_trigger_compare(conditions, out_dir / "table5_trigger_compare.png")
 
     print("-" * 78)
     print("完了．出力ファイル一覧:")

@@ -6,38 +6,44 @@ The Python package `waragent-tools` (uv workspace member; module `waragent_tools
 
 ## `visualize`
 
-Reads `results/{dir}/metrics.csv` and `events.csv` and writes one 2×2 figure `war_dynamics.png`:
+Reads a run directory's `metrics.csv` (long form) and the `x.hua2024.action` events in `events.jsonl`, and writes one 2×2 figure `war_dynamics.png`:
 
 1. **Alliance / war network** (final round) — a `networkx` circular graph; alliance (M) edges in green, war (W, incl. escalation joins) edges as red dashes; nodes labelled with anonymized country names (Country A..H).
 2. **Board transitions** — per-round counts of `declare_war` / `alliance` / `non_aggression` / `mobilize` actions.
 3. **Metric time series** — `alliance_mi`, `declaration_jaccard`, `mobilization_jaccard` vs round.
 4. **Conflict scale** — `n_conflicts` (war pairs) and `n_mobilized` (mobilized countries) vs round (escalation).
 
+Which run is shown is answered by runvault when `--results-dir` is omitted (`runvault path --experiment waragent --latest --subcommand run --standalone`). Figures go *beside* the run directory (`results/waragent/figures/<run_slug>/`), because `manifest.csv` is settled by `finish()` and anything added afterwards would carry no hash.
+
 ```bash
 uv run waragent-tools visualize
-uv run waragent-tools visualize --results_dir results/20260524_153000 --output_dir out
+uv run waragent-tools visualize --results-dir "$(runvault path --experiment waragent --latest --subcommand run --standalone)"
+uv run waragent-tools visualize --output-dir out
 ```
 
 ## `visualize-sweep`
 
-Reads `results/{dir}_sweep/sweep_summary.csv` and writes:
+Rebuilds the one-row-per-execution sweep table from the sweep parent's child runs (runvault keeps no such table on disk) and writes:
 
 - `sweep_outbreak_heatmap.png` — war-outbreak rate over trigger × stance.
 - `sweep_alliance_mi_heatmap.png` — mean `final_alliance_mi` over trigger × stance.
 - `sweep_trigger_bars.png` — per-trigger war-outbreak rate vs cold-war rate (the "small trigger still escalates / null stays cold" trend).
 
 ```bash
-uv run waragent-tools visualize-sweep --sweep_dir results/20260524_160000_sweep
+uv run waragent-tools visualize-sweep
+uv run waragent-tools visualize-sweep --sweep-dir "$(runvault path --experiment waragent --latest --subcommand sweep)"
 ```
 
-Note: the `null` trigger label is read as the literal string (not parsed as a missing value).
+Note: a legacy `sweep_summary.csv`, if present, is read instead; there the `null` trigger label is read as the literal string (not parsed as a missing value).
 
 ## `reproduce`
 
-Reads `results/{dir}_reproduce/reproduce_summary.json` and the per-trigger `metrics.csv` files, prints the observed-vs-paper Table 2–5 anchor table, and writes:
+Reads the `reproduce` parent (its `scope=sweep` alliance-polarization gap) and its per-condition child runs, prints the per-trigger table, and writes:
 
-- `figures/table2_alliance_escalation.png` — per-trigger `alliance_mi` and `n_conflicts` time series (alliance polarization and escalation).
-- `figures/table5_trigger_compare.png` — per-trigger cross-comparison bars: war-outbreak / cold-war flags and final alliance MI.
+- `table2_alliance_escalation.png` — per-trigger `alliance_mi` and `n_conflicts` time series (alliance polarization and escalation).
+- `table5_trigger_compare.png` — per-trigger cross-comparison bars: war-outbreak / cold-war flags and final alliance MI.
+
+The anchor bands and their PASS/off verdicts are not printed here. The bands are this replication's own, not the paper's claim, so they stay in the Rust binary's console output — putting the same threshold in two places lets them drift apart.
 
 ```bash
 uv run waragent-tools reproduce
@@ -47,11 +53,12 @@ uv run waragent-tools reproduce --json                 # print the summary only
 
 ## `show-experiment-settings`
 
-Pretty-prints `config.json` (run) or `sweep_config.json` (sweep) plus `run_metadata.json` (model / endpoint / temperature / seed / cache-hit rate / war-outbreak / cold-war). `results/latest` is resolved.
+Pretty-prints the run's conditions (`config.json` `parameters`), the `llm` block of `run.json`, and the run-scope metrics (call count, cache hits, final round, cold-war flag, escalation round). Legacy `config.json` / `sweep_config.json` / `run_metadata.json` are read as before.
 
 ```bash
-uv run waragent-tools show-experiment-settings --results-dir results/latest
-uv run waragent-tools show-experiment-settings --results-dir results/latest --json
+uv run waragent-tools show-experiment-settings
+uv run waragent-tools show-experiment-settings --results-dir "$(runvault path --experiment waragent --latest --subcommand sweep)"
+uv run waragent-tools show-experiment-settings --json
 ```
 
 ## Font note

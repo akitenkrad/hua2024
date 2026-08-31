@@ -1,33 +1,35 @@
 //! Hua et al. (2024) "War and Peace (WarAgent)" — 再現実験の CLI エントリポイント．
 //!
 //! `run`       : 単一設定で LLM 駆動の国エージェント外交 ABM を実行する．
-//! `sweep`     : トリガー強度 × スタンス を走査し，開戦率・同盟 MI 等を
-//!               `sweep_summary.csv` に集計する．
+//! `sweep`     : トリガー強度 × スタンス を走査する．親 run 1 本 + セルごとの子 run．
 //! `reproduce` : 論文 (Hua et al. 2024) の Table 2-5 ヘッドライン指標 — トリガー強度に
 //!               応じた開戦頻度・エスカレーション・同盟分極化 — を 3 つのトリガー条件
-//!               (null / dardanelles / archduke) を `wwi-small` で走らせ，観測値 vs
-//!               論文値の PASS/off アンカーと figure 入力を `reproduce_summary.json`
-//!               へ集約する．`--mock` でライブ LLM 無しに決定論再現する．
+//!               (null / dardanelles / archduke) を `wwi-small` で走らせて確かめる．
+//!               親 run 1 本 + トリガー条件ごとの子 run で，条件をまたいだ差は親の
+//!               sweep スコープ指標に入る．`--mock` でライブ LLM 無しに決定論再現する．
 //!
 //! 反実仮想分析・WWII/戦国時代シナリオ・脱匿名化比較は本コマンドの対象外 (拡張点)．
+//!
+//! サブコマンド 1 回が runvault の run 1 本になる (掃引は親 1 本 + 子)．出力の
+//! 置き場と同一性 (run ディレクトリ・`config.json`・`metrics.csv`・`events.jsonl`)
+//! は runvault が持つので，ここではタイムスタンプ付きディレクトリも `latest`
+//! symlink も作らない．
 
 use std::fs;
 use std::path::Path;
 
 use clap::{Parser, Subcommand};
-use socsim_results::{refresh_latest_symlink, timestamp, write_csv, write_json};
+use runvault::{Lineage, Run, RunOptions};
 
 use socsim_llm::mock::ScriptedClient;
-use socsim_llm::PromptCache;
+use socsim_llm::{LlmClient, PromptCache};
 use waragent_simulation::config::{
-    derive_run_seed, parse_scenario, parse_stance, parse_trigger, Config, LlmSettings, Scenario,
-    Trigger,
+    derive_run_seed, parse_scenario, parse_stance, parse_trigger, scenario_country_count, Config,
+    LlmSettings, Scenario, Trigger,
 };
-use waragent_simulation::llm::wrap_client;
-use waragent_simulation::simulation::{
-    ensure_output_dir, run, run_with_client, save_events, save_metrics, save_run_metadata,
-    SimulationResult,
-};
+use waragent_simulation::llm::{build_live_client, wrap_client, WarClient};
+use waragent_simulation::record::{self, DOMAIN, EXPERIMENT, REPO_ID, SWEEP_SCOPE};
+use waragent_simulation::simulation::{run_with_client, SimulationResult};
 use waragent_simulation::world::Stance;
 
 // ---------------------------------------------------------------------------
@@ -54,7 +56,7 @@ enum Commands {
     Run(RunArgs),
     /// トリガー強度 × スタンス を走査し，開戦率・同盟 MI を集計する．
     Sweep(SweepArgs),
-    /// 論文 Table 2-5 のヘッドライン指標を一括再現する (観測 vs 論文 + figure 入力)．
+    /// 論文 Table 2-5 のヘッドライン指標を一括再現する (トリガー条件ごとに子 run)．
     Reproduce(ReproduceArgs),
 }
 
@@ -88,7 +90,7 @@ struct RunArgs {
     #[arg(long, default_value_t = 1)]
     runs: usize,
 
-    /// 乱数シード (省略時はランダム; socsim コア層のみ支配)．
+    /// 乱数シード (省略時は 42; socsim コア層のみ支配)．
     #[arg(long)]
     seed: Option<u64>,
 
@@ -104,7 +106,7 @@ struct RunArgs {
     #[arg(long, default_value = ".llm_cache/cache.json")]
     cache_path: String,
 
-    /// 結果出力ディレクトリ．
+    /// 結果出力ベースディレクトリ (runvault の results root)．
     #[arg(long, default_value = "results")]
     output_dir: String,
 }
@@ -155,7 +157,7 @@ struct SweepArgs {
     #[arg(long, default_value = ".llm_cache/cache.json")]
     cache_path: String,
 
-    /// 結果出力ベースディレクトリ．
+    /// 結果出力ベースディレクトリ (runvault の results root)．
     #[arg(long, default_value = "results")]
     output_dir: String,
 }
@@ -194,7 +196,7 @@ struct ReproduceArgs {
     #[arg(long, default_value = ".llm_cache/cache.json")]
     cache_path: String,
 
-    /// 結果出力ベースディレクトリ．
+    /// 結果出力ベースディレクトリ (runvault の results root)．
     #[arg(long, default_value = "results")]
     output_dir: String,
 
@@ -211,29 +213,9 @@ struct ReproduceArgs {
 // 補助
 // ---------------------------------------------------------------------------
 
-/// `sweep_summary.csv` の 1 行．
-#[derive(serde::Serialize)]
-struct SweepRow {
-    scenario: String,
-    trigger: String,
-    stance: String,
-    run: usize,
-    seed: u64,
-    final_round: usize,
-    war_outbreak: u8,
-    escalation_round: Option<u64>,
-    n_conflicts: u64,
-    cold_war_flag: u8,
-    final_alliance_mi: f64,
-    final_declaration_jaccard: f64,
-    final_mobilization_jaccard: f64,
-    cache_hit_rate: f64,
-}
-
-/// `sweep_config.json` の構造体．
+/// `sweep` 親 run の `parameters`．掃引の格子そのものを持つ．
 #[derive(serde::Serialize)]
 struct SweepConfigJson {
-    command: &'static str,
     scenario: String,
     trigger_values: Vec<String>,
     stance_values: Vec<String>,
@@ -246,12 +228,85 @@ struct SweepConfigJson {
     llm_seed: u64,
 }
 
+/// `reproduce` 親 run の `parameters`．トリガー条件と共通設定を持つ．
+///
+/// `rounds` は `--quick` 適用後の実効値である (`--quick` は `rounds` を 2 に
+/// 縮約するので，フラグではなく効いた値を残す)．`mock` は結果を決める値なので
+/// 持つ — 子は `llm` ブロックの endpoint (`mock://…`) でも判別できるが，親は
+/// 自分では LLM を呼ばないので `llm` ブロックを持たない．
+#[derive(serde::Serialize)]
+struct ReproduceConfigJson {
+    scenario: String,
+    trigger_values: Vec<String>,
+    secretary_passes: usize,
+    rounds: usize,
+    war_threshold: usize,
+    seed: u64,
+    mock: bool,
+    llm_temperature: f32,
+    llm_seed: u64,
+}
+
 /// カンマ区切り文字列を trim 済みの非空リストへ．
 fn split_csv(s: &str) -> Vec<String> {
     s.split(',')
         .map(|t| t.trim().to_string())
         .filter(|t| !t.is_empty())
         .collect()
+}
+
+/// LLM レイヤ設定を組む．mock は永続キャッシュを持たないので `cache_path` を落とす．
+fn llm_settings(temperature: f32, seed: u64, cache_path: &str, mock: bool) -> LlmSettings {
+    LlmSettings {
+        temperature,
+        seed,
+        cache_path: (!mock).then(|| cache_path.to_string()),
+    }
+}
+
+/// LLM キャッシュの置き場を用意する (ライブ実行のみ; mock は in-memory)．
+fn ensure_cache_dir(cfg: &Config) {
+    if let Some(parent) = cfg
+        .llm
+        .cache_path
+        .as_deref()
+        .and_then(|path| Path::new(path).parent())
+    {
+        let _ = fs::create_dir_all(parent);
+    }
+}
+
+/// LLM クライアントを 1 本組む．
+///
+/// `run.json` の `llm` ブロックに書くモデル名と endpoint は，実際に応答する
+/// バックエンドから採らないと意味を持たないので，組み立ては `Run::start` より前に
+/// 置く (このために `simulation::run` を消してある — 中でクライアントを組む入口が
+/// 残っていると，`llm` ブロックを埋めないまま記録できてしまう)．
+fn build_client(cfg: &Config, mock: bool) -> WarClient {
+    if mock {
+        mock_war_client()
+    } else {
+        build_live_client(&cfg.llm).unwrap_or_else(|e| panic!("LLM クライアント構築に失敗: {e}"))
+    }
+}
+
+/// `RunOptions` の共通部分 (シミュレーション 1 本ぶんの子/単独 run)．
+fn run_options(cfg: &Config, output_dir: &str, seed: u64, client: &WarClient) -> RunOptions {
+    let parameters = cfg.to_run_config_json();
+    RunOptions::new(EXPERIMENT, "run")
+        .repo_id(REPO_ID)
+        .domain(DOMAIN)
+        .results_root(output_dir)
+        .parameters(&parameters)
+        .expect("runvault: parameters の組み立てに失敗")
+        .seed_pointers(["/seed"])
+        .master_seed(seed)
+        .llm(record::llm_block(
+            client.inner().model(),
+            client.inner().endpoint(),
+            cfg.llm.temperature,
+        ))
+        .replication(record::replication())
 }
 
 // ---------------------------------------------------------------------------
@@ -266,13 +321,45 @@ fn cmd_run(args: RunArgs) {
         .as_deref()
         .map(|s| parse_stance(s).unwrap_or_else(|e| panic!("{e}")));
 
-    let timestamp = timestamp();
-    let output_dir = format!("{}/{}", args.output_dir, timestamp);
+    let base_seed = args.seed.unwrap_or(42);
+    let runs = args.runs.max(1);
 
-    if let Some(parent) = Path::new(&args.cache_path).parent() {
-        let _ = fs::create_dir_all(parent);
-    }
-    ensure_output_dir(&output_dir);
+    // 記録するのは最後の 1 本．`--runs N` は同じ条件を N 本回して最後の試行の詳細
+    // だけを残す既存の動きなので (旧実装も `save_metrics` を最終試行でしか呼んで
+    // いない)，`master_seed` には実際に世界を支配した `derive_run_seed(base, N-1)`
+    // を書き，`replicate_index` を N-1 にする．CLI で与えた根のシードは
+    // `/parameters.seed` にあり，seed_pointers 経由で execution_hash に残る．
+    let recorded_seed = derive_run_seed(base_seed, runs - 1);
+
+    let base_cfg = Config {
+        scenario,
+        trigger,
+        stance_override,
+        secretary_passes: args.secretary_passes,
+        rounds: args.rounds,
+        war_threshold: args.war_threshold,
+        // `parameters` に載るのは CLI で与えた根のシード．実際に世界を支配した
+        // 派生シードは `master_seed` が持つ．
+        seed: Some(base_seed),
+        llm: llm_settings(args.llm_temperature, args.llm_seed, &args.cache_path, false),
+    };
+    ensure_cache_dir(&base_cfg);
+
+    // クライアントは run を開始する前に組む (`llm` ブロックのため)．最初の 1 本で
+    // そのまま使い，2 本目以降は旧実装と同じく 1 本ごとに組み直す．
+    let mut pending = Some(build_client(&base_cfg, false));
+    let mut rv = Run::start(
+        run_options(
+            &base_cfg,
+            &args.output_dir,
+            recorded_seed,
+            pending.as_ref().expect("直前に組んだクライアント"),
+        )
+        .replicate_index((runs - 1) as u64),
+    )
+    .expect("runvault: run の開始に失敗");
+    // 論文 Table 2 の報告値は，この 3 指標をその条件で直接測る `run` にだけ置く．
+    record::log_paper_references(&mut rv);
 
     println!("=== Hua et al. (2024) WarAgent 世界大戦外交 再現実験 ===");
     println!(
@@ -284,39 +371,28 @@ fn cmd_run(args: RunArgs) {
             .unwrap_or("scenario-default"),
         args.rounds,
         args.secretary_passes,
-        args.runs,
+        runs,
     );
     println!(
-        "LLM: temp={} llm_seed={} cache={} | seed: {:?}",
-        args.llm_temperature, args.llm_seed, args.cache_path, args.seed
+        "LLM: temp={} llm_seed={} cache={} | seed: {}",
+        args.llm_temperature, args.llm_seed, args.cache_path, base_seed
     );
-    println!("出力先: {output_dir}");
+    println!("出力先: {}", rv.dir().display());
     println!("-------------------------------------------------");
 
-    let base_seed = args.seed.unwrap_or(42);
     let mut last_result: Option<SimulationResult> = None;
     let mut outbreak_count = 0usize;
     let mut cold_war_count = 0usize;
 
-    for run_idx in 0..args.runs.max(1) {
+    for run_idx in 0..runs {
         let seed = derive_run_seed(base_seed, run_idx);
         let cfg = Config {
-            scenario,
-            trigger,
-            stance_override,
-            secretary_passes: args.secretary_passes,
-            rounds: args.rounds,
-            war_threshold: args.war_threshold,
             seed: Some(seed),
-            llm: LlmSettings {
-                temperature: args.llm_temperature,
-                seed: args.llm_seed,
-                cache_path: Some(args.cache_path.clone()),
-            },
-            output_dir: output_dir.clone(),
+            ..base_cfg.clone()
         };
 
-        let result = run(&cfg).unwrap_or_else(|e| panic!("実行に失敗: {e}"));
+        let client = pending.take().unwrap_or_else(|| build_client(&cfg, false));
+        let result = run_with_client(&cfg, client).unwrap_or_else(|e| panic!("実行に失敗: {e}"));
         if result.war_outbreak {
             outbreak_count += 1;
         }
@@ -324,20 +400,13 @@ fn cmd_run(args: RunArgs) {
             cold_war_count += 1;
         }
 
-        // 最後の試行の詳細を保存する (代表 run)．
-        if run_idx + 1 == args.runs.max(1) {
-            save_metrics(&result.metrics_history, &output_dir);
-            save_events(&result.event_log, &output_dir);
-            save_run_metadata(&result, &cfg, &output_dir);
-            let path = format!("{output_dir}/config.json");
-            write_json(&cfg.to_run_config_json(), &path).expect("config.json の書き込みに失敗");
+        // 最後の試行の詳細を記録する (代表 run)．
+        if run_idx + 1 == runs {
+            record::log_simulation(&mut rv, &result, scenario_country_count(scenario));
             last_result = Some(result);
         }
     }
 
-    let _ = refresh_latest_symlink(&args.output_dir, &timestamp);
-
-    let runs = args.runs.max(1);
     println!(
         "開戦発生: {}/{} ({:.1}%) | 冷戦 (緊張のみ): {}/{}",
         outbreak_count,
@@ -366,10 +435,12 @@ fn cmd_run(args: RunArgs) {
             result.llm_model,
         );
     }
-    println!("メトリクス → {output_dir}/metrics.csv");
-    println!("イベント   → {output_dir}/events.csv");
-    println!("LLM メタ   → {output_dir}/run_metadata.json");
-    println!("設定       → {output_dir}/config.json");
+
+    let dir = rv.finish().expect("runvault: run の完了に失敗");
+    println!("メトリクス → {}/metrics.csv", dir.display());
+    println!("行動ログ   → {}/events.jsonl", dir.display());
+    println!("論文値     → {}/reference.csv", dir.display());
+    println!("設定       → {}/config.json", dir.display());
 }
 
 // ---------------------------------------------------------------------------
@@ -387,14 +458,42 @@ fn cmd_sweep(args: SweepArgs) {
         .map(|s| parse_stance(s).unwrap_or_else(|e| panic!("{e}")))
         .collect();
 
-    let timestamp = timestamp();
-    let sweep_dir = format!("{}/{}_sweep", args.output_dir, timestamp);
-    fs::create_dir_all(&sweep_dir).expect("sweep ディレクトリの作成に失敗");
-    if let Some(parent) = Path::new(&args.cache_path).parent() {
-        let _ = fs::create_dir_all(parent);
-    }
-
     let n_total = triggers.len() * stances.len() * args.runs;
+
+    // 親 run: 格子の定義そのものを parameters に持つ．個別セルの指標は書かない．
+    // 親は 1 本のシミュレーションではないので master_seed を名乗らない (セルごとの
+    // 子が派生シードをそれぞれ持つ)．base seed は /parameters.seed と seed_pointers
+    // 経由で execution_hash に残る．sweep_id は runvault が親の run_slug で埋める．
+    let sweep_parameters = SweepConfigJson {
+        scenario: scenario.label().to_string(),
+        trigger_values: triggers.iter().map(|t| t.label().to_string()).collect(),
+        stance_values: stances.iter().map(|s| s.label().to_string()).collect(),
+        secretary_passes: args.secretary_passes,
+        rounds: args.rounds,
+        war_threshold: args.war_threshold,
+        runs: args.runs,
+        seed: args.seed,
+        llm_temperature: args.llm_temperature,
+        llm_seed: args.llm_seed,
+    };
+    let parent = Run::start(
+        RunOptions::new(EXPERIMENT, "sweep")
+            .repo_id(REPO_ID)
+            .domain(DOMAIN)
+            .results_root(&args.output_dir)
+            .parameters(&sweep_parameters)
+            .expect("runvault: sweep の parameters の組み立てに失敗")
+            .seed_pointers(["/seed"])
+            .sweep_parent()
+            .replication(record::replication()),
+    )
+    .expect("runvault: sweep 親 run の開始に失敗");
+
+    let sweep_id = parent
+        .sweep_id()
+        .expect("runvault: sweep 親に sweep_id がありません")
+        .to_string();
+    let parent_run_uid = parent.run_uid().to_string();
 
     println!("=== Hua et al. (2024) WarAgent 感度分析 (トリガー × スタンス) ===");
     println!(
@@ -405,10 +504,12 @@ fn cmd_sweep(args: SweepArgs) {
         args.runs,
         n_total,
     );
-    println!("出力先: {sweep_dir}");
+    println!("出力先: {}", parent.dir().display());
     println!("-----------------------------------------------------------");
 
-    let mut summary_rows: Vec<SweepRow> = Vec::with_capacity(n_total);
+    // コンソールの要約に使うだけの控え (ディスクには書かない; 同じ値は子 run の
+    // 指標にある)．
+    let mut console: Vec<(&'static str, bool, f64)> = Vec::with_capacity(n_total);
     let mut done = 0usize;
 
     for &trigger in &triggers {
@@ -423,16 +524,37 @@ fn cmd_sweep(args: SweepArgs) {
                     rounds: args.rounds,
                     war_threshold: args.war_threshold,
                     seed: Some(seed),
-                    llm: LlmSettings {
-                        temperature: args.llm_temperature,
-                        seed: args.llm_seed,
-                        cache_path: Some(args.cache_path.clone()),
-                    },
-                    output_dir: sweep_dir.clone(),
+                    llm: llm_settings(args.llm_temperature, args.llm_seed, &args.cache_path, false),
                 };
+                ensure_cache_dir(&cfg);
+                let client = build_client(&cfg, false);
 
-                let result = run(&cfg).unwrap_or_else(|e| panic!("実行に失敗: {e}"));
-                summary_rows.push(summarize(&result, scenario, trigger, stance, run_idx, seed));
+                // 子は «そのセルの run» そのもの．master_seed は base から派生した
+                // 実際に使われるシードで，同一セルの繰り返しは replicate_index で
+                // 分ける．parameters は手で回した `run` と同じ形なので，同じ条件
+                // なら config_hash が一致する．
+                let mut child = Run::start(
+                    run_options(&cfg, &args.output_dir, seed, &client)
+                        .replicate_index(run_idx as u64)
+                        .lineage(Lineage {
+                            sweep_id: Some(sweep_id.clone()),
+                            parent_run_uid: Some(parent_run_uid.clone()),
+                            ..Default::default()
+                        }),
+                )
+                .expect("runvault: 子 run の開始に失敗");
+
+                let result =
+                    run_with_client(&cfg, client).unwrap_or_else(|e| panic!("実行に失敗: {e}"));
+                record::log_simulation(&mut child, &result, scenario_country_count(scenario));
+                child.finish().expect("runvault: 子 run の完了に失敗");
+
+                let final_mi = result
+                    .metrics_history
+                    .last()
+                    .map(|m| m.alliance_mi)
+                    .unwrap_or(0.0);
+                console.push((trigger.label(), result.war_outbreak, final_mi));
                 done += 1;
             }
             println!(
@@ -446,48 +568,22 @@ fn cmd_sweep(args: SweepArgs) {
         }
     }
 
-    // sweep_summary.csv (各行を serialize; socsim_results::write_csv に委譲)．
-    {
-        let path = format!("{sweep_dir}/sweep_summary.csv");
-        write_csv(&summary_rows, &path).expect("sweep_summary.csv の書き込みに失敗");
-    }
-
-    // sweep_config.json
-    {
-        let config_json = SweepConfigJson {
-            command: "sweep",
-            scenario: scenario.label().to_string(),
-            trigger_values: triggers.iter().map(|t| t.label().to_string()).collect(),
-            stance_values: stances.iter().map(|s| s.label().to_string()).collect(),
-            secretary_passes: args.secretary_passes,
-            rounds: args.rounds,
-            war_threshold: args.war_threshold,
-            runs: args.runs,
-            seed: args.seed,
-            llm_temperature: args.llm_temperature,
-            llm_seed: args.llm_seed,
-        };
-        let path = format!("{sweep_dir}/sweep_config.json");
-        write_json(&config_json, &path).expect("sweep_config.json の書き込みに失敗");
-    }
-
-    let _ = refresh_latest_symlink(&args.output_dir, &format!("{timestamp}_sweep"));
+    let dir = parent
+        .finish()
+        .expect("runvault: sweep 親 run の完了に失敗");
 
     println!("===========================================================");
     println!("スイープ完了: {n_total} 実行");
     println!("-----------------------------------------------------------");
     println!("トリガー別の開戦発生頻度 / 平均 同盟MI:");
     for &trigger in &triggers {
-        let rows: Vec<&SweepRow> = summary_rows
-            .iter()
-            .filter(|r| r.trigger == trigger.label())
-            .collect();
+        let rows: Vec<&(&str, bool, f64)> =
+            console.iter().filter(|r| r.0 == trigger.label()).collect();
         if rows.is_empty() {
             continue;
         }
-        let outbreak_freq =
-            rows.iter().filter(|r| r.war_outbreak == 1).count() as f64 / rows.len() as f64;
-        let avg_mi = rows.iter().map(|r| r.final_alliance_mi).sum::<f64>() / rows.len() as f64;
+        let outbreak_freq = rows.iter().filter(|r| r.1).count() as f64 / rows.len() as f64;
+        let avg_mi = rows.iter().map(|r| r.2).sum::<f64>() / rows.len() as f64;
         println!(
             "  trigger={} → 開戦 = {:.1}% | 同盟MI = {:.3}",
             trigger.label(),
@@ -496,8 +592,8 @@ fn cmd_sweep(args: SweepArgs) {
         );
     }
     println!("-----------------------------------------------------------");
-    println!("サマリ → {sweep_dir}/sweep_summary.csv");
-    println!("設定   → {sweep_dir}/sweep_config.json");
+    println!("親 run → {}", dir.display());
+    println!("子 run は lineage.parent_run_uid で親を指す．");
 }
 
 /// sweep の試行シードを派生する (トリガー・スタンス・試行 index で独立化)．
@@ -518,39 +614,11 @@ fn label_hash(s: &str) -> u64 {
     h
 }
 
-/// 1 実行結果を sweep の 1 行に集約する．
-fn summarize(
-    result: &SimulationResult,
-    scenario: Scenario,
-    trigger: Trigger,
-    stance: Stance,
-    run_idx: usize,
-    seed: u64,
-) -> SweepRow {
-    let last = result.metrics_history.last();
-    SweepRow {
-        scenario: scenario.label().to_string(),
-        trigger: trigger.label().to_string(),
-        stance: stance.label().to_string(),
-        run: run_idx,
-        seed,
-        final_round: result.final_round,
-        war_outbreak: if result.war_outbreak { 1 } else { 0 },
-        escalation_round: result.escalation_round,
-        n_conflicts: result.n_conflicts,
-        cold_war_flag: if result.cold_war_flag { 1 } else { 0 },
-        final_alliance_mi: last.map(|m| m.alliance_mi).unwrap_or(0.0),
-        final_declaration_jaccard: last.map(|m| m.declaration_jaccard).unwrap_or(0.0),
-        final_mobilization_jaccard: last.map(|m| m.mobilization_jaccard).unwrap_or(0.0),
-        cache_hit_rate: result.metadata.cache_hit_rate(),
-    }
-}
-
 // ---------------------------------------------------------------------------
 // reproduce (論文 Table 2-5 ヘッドライン指標 一括再現)
 // ---------------------------------------------------------------------------
 
-/// 1 設定を実行する (`--mock` ならライブ LLM の代わりに scripted mock を使う)．
+/// reproduce 用の決定論 scripted mock クライアントを構築する (trigger 感応ポリシー)．
 ///
 /// mock ポリシーは «プロンプトに注入された breaking-event (トリガー) の強度を読み，
 /// 史実的にもっとも好戦的な国 (Country A) の行動をトリガー強度でスケールする» 決定論
@@ -561,24 +629,7 @@ fn summarize(
 /// - dardanelles (高強度: "strait"/"blockaded") → A が総動員のみ (冷戦)．
 /// - naval-incident (低強度: "naval skirmish") → A が外交メッセージのみ (冷戦)．
 /// - null (注入なし) → 全国 wait (平時)．
-fn run_one(cfg: &Config, mock: bool) -> Result<SimulationResult, String> {
-    if !mock {
-        return run(cfg);
-    }
-    let client = mock_war_client();
-    // mock は in-memory cache なので保存先を持たない (cache().save() をスキップさせる)．
-    let mock_cfg = Config {
-        llm: LlmSettings {
-            cache_path: None,
-            ..cfg.llm.clone()
-        },
-        ..cfg.clone()
-    };
-    run_with_client(&mock_cfg, client)
-}
-
-/// reproduce 用の決定論 scripted mock クライアントを構築する (trigger 感応ポリシー)．
-fn mock_war_client() -> waragent_simulation::llm::WarClient {
+fn mock_war_client() -> WarClient {
     let backend = ScriptedClient::new("mock-llama3.2", move |prompt: &str| {
         // 秘書検証プロンプトは決定 prompt と違い breaking-event を含まない．秘書の役割は
         // «妥当なら変更せず返す» なので，提示された行動 JSON をそのまま echo して決定を
@@ -633,66 +684,82 @@ fn mock_war_client() -> waragent_simulation::llm::WarClient {
     wrap_client(backend, PromptCache::in_memory())
 }
 
-/// `reproduce_summary.json` の 1 トリガー条件行．
-#[derive(serde::Serialize)]
-struct ReproduceScenario {
-    /// トリガー条件ラベル (null / naval-incident / dardanelles / archduke-assassination)．
-    trigger: String,
-    /// 観測した世界大戦勃発 (1/0)．
+/// 1 トリガー条件ぶんの観測 (コンソールの表とアンカー判定に使う控え)．
+///
+/// ディスクには «この構造体» としては書かない — 中身はすべて子 run の指標にある．
+struct TriggerOutcome {
+    trigger: &'static str,
     war_outbreak: u8,
-    /// 観測した冷戦フラグ (緊張のみ; 1/0)．
     cold_war_flag: u8,
-    /// 初回勃発ラウンド (なければ -1)．
-    escalation_round: i64,
-    /// 終了時点の宣戦布告 (W) 対数．
+    escalation_round: Option<u64>,
     n_conflicts: u64,
-    /// 最終ラウンドの同盟分割 MI (vs 史実)．
     final_alliance_mi: f64,
-    /// 最終ラウンドの宣戦布告 Jaccard (vs 史実)．
     final_declaration_jaccard: f64,
-    /// 最終ラウンドの総動員 Jaccard (vs 史実)．
     final_mobilization_jaccard: f64,
-    /// 実行ラウンド数．
     final_round: usize,
-    /// この結果を保存したサブディレクトリ (Python の figure 生成入力)．
-    results_subdir: String,
 }
 
-/// `reproduce_summary.json` のアンカー判定行．
-#[derive(serde::Serialize)]
-struct ReproduceAnchor {
-    name: String,
-    paper_value: String,
+/// この再現実装が置いたアンカー (論文の定性的な主張を帯に落としたもの)．
+///
+/// 帯も PASS/OFF も論文が印字した数ではないので記録しない — コンソールに残す．
+/// 観測値そのものは子 run (と親の sweep スコープ指標) にある．
+struct Anchor {
+    name: &'static str,
+    paper_value: &'static str,
     observed: f64,
     target_lo: f64,
     target_hi: f64,
-    pass: bool,
 }
 
-/// `reproduce_summary.json` のルート．
-#[derive(serde::Serialize)]
-struct ReproduceSummary {
-    command: &'static str,
-    paper: &'static str,
-    scenario: String,
-    mock: bool,
-    quick: bool,
-    scenarios: Vec<ReproduceScenario>,
-    anchors: Vec<ReproduceAnchor>,
-    n_pass: usize,
-    n_anchors: usize,
+impl Anchor {
+    fn pass(&self) -> bool {
+        self.observed >= self.target_lo && self.observed <= self.target_hi
+    }
 }
 
 fn cmd_reproduce(args: ReproduceArgs) {
     let scenario = parse_scenario(&args.scenario).unwrap_or_else(|e| panic!("{e}"));
     let rounds = if args.quick { 2 } else { args.rounds };
 
-    let ts = timestamp();
-    let out_dir = format!("{}/{}_reproduce", args.output_dir, ts);
-    ensure_output_dir(&out_dir);
-    if let Some(parent) = Path::new(&args.cache_path).parent() {
-        let _ = fs::create_dir_all(parent);
-    }
+    // トリガー強度の段階 (null → 平時 / dardanelles → 冷戦 / archduke → 開戦)．
+    let triggers = [
+        Trigger::Null,
+        Trigger::Dardanelles,
+        Trigger::ArchdukeAssassination,
+    ];
+
+    // 親 run: トリガー条件と共通設定を parameters に持ち，条件をまたいだ差
+    // (同盟分極化のギャップ) を sweep スコープの指標として書く．条件ごとの値は
+    // それぞれの子 run にあるので，親には重ねない．
+    let parent_parameters = ReproduceConfigJson {
+        scenario: scenario.label().to_string(),
+        trigger_values: triggers.iter().map(|t| t.label().to_string()).collect(),
+        secretary_passes: args.secretary_passes,
+        rounds,
+        war_threshold: args.war_threshold,
+        seed: args.seed,
+        mock: args.mock,
+        llm_temperature: args.llm_temperature,
+        llm_seed: args.llm_seed,
+    };
+    let mut parent = Run::start(
+        RunOptions::new(EXPERIMENT, "reproduce")
+            .repo_id(REPO_ID)
+            .domain(DOMAIN)
+            .results_root(&args.output_dir)
+            .parameters(&parent_parameters)
+            .expect("runvault: reproduce の parameters の組み立てに失敗")
+            .seed_pointers(["/seed"])
+            .sweep_parent()
+            .replication(record::replication()),
+    )
+    .expect("runvault: reproduce 親 run の開始に失敗");
+
+    let sweep_id = parent
+        .sweep_id()
+        .expect("runvault: reproduce 親に sweep_id がありません")
+        .to_string();
+    let parent_run_uid = parent.run_uid().to_string();
 
     println!("=== Hua et al. (2024) WarAgent 論文 Table 2-5 ヘッドライン指標 一括再現 ===");
     println!(
@@ -703,22 +770,12 @@ fn cmd_reproduce(args: ReproduceArgs) {
         args.mock,
         args.quick,
     );
-    println!("出力先: {out_dir}");
+    println!("出力先: {}", parent.dir().display());
     println!("-------------------------------------------------");
 
-    // トリガー強度の段階 (null → 平時 / dardanelles → 冷戦 / archduke → 開戦)．
-    let triggers = [
-        Trigger::Null,
-        Trigger::Dardanelles,
-        Trigger::ArchdukeAssassination,
-    ];
-
-    let mut scenarios: Vec<ReproduceScenario> = Vec::new();
+    let mut outcomes: Vec<TriggerOutcome> = Vec::new();
 
     for trigger in triggers {
-        let subdir_name = trigger.label().to_string();
-        let subdir = format!("{out_dir}/{subdir_name}");
-        ensure_output_dir(&subdir);
         let seed = socsim_core::derive_seed(args.seed, &[label_hash(trigger.label())]);
         let cfg = Config {
             scenario,
@@ -728,105 +785,118 @@ fn cmd_reproduce(args: ReproduceArgs) {
             rounds,
             war_threshold: args.war_threshold,
             seed: Some(seed),
-            llm: LlmSettings {
-                temperature: args.llm_temperature,
-                seed: args.llm_seed,
-                cache_path: Some(args.cache_path.clone()),
-            },
-            output_dir: subdir.clone(),
+            llm: llm_settings(
+                args.llm_temperature,
+                args.llm_seed,
+                &args.cache_path,
+                args.mock,
+            ),
         };
+        ensure_cache_dir(&cfg);
+        let client = build_client(&cfg, args.mock);
 
-        let result = run_one(&cfg, args.mock).unwrap_or_else(|e| panic!("実行に失敗: {e}"));
+        let mut child = Run::start(
+            run_options(&cfg, &args.output_dir, seed, &client)
+                .replicate_index(0)
+                .lineage(Lineage {
+                    sweep_id: Some(sweep_id.clone()),
+                    parent_run_uid: Some(parent_run_uid.clone()),
+                    ..Default::default()
+                }),
+        )
+        .expect("runvault: 子 run の開始に失敗");
 
-        save_metrics(&result.metrics_history, &subdir);
-        save_events(&result.event_log, &subdir);
-        save_run_metadata(&result, &cfg, &subdir);
-        let path = format!("{subdir}/config.json");
-        write_json(&cfg.to_run_config_json(), &path).expect("config.json の書き込みに失敗");
+        let result = run_with_client(&cfg, client).unwrap_or_else(|e| panic!("実行に失敗: {e}"));
+        record::log_simulation(&mut child, &result, scenario_country_count(scenario));
+        child.finish().expect("runvault: 子 run の完了に失敗");
 
         let last = result.metrics_history.last();
-        scenarios.push(ReproduceScenario {
-            trigger: trigger.label().to_string(),
+        outcomes.push(TriggerOutcome {
+            trigger: trigger.label(),
             war_outbreak: if result.war_outbreak { 1 } else { 0 },
             cold_war_flag: if result.cold_war_flag { 1 } else { 0 },
-            escalation_round: result.escalation_round.map(|r| r as i64).unwrap_or(-1),
+            escalation_round: result.escalation_round,
             n_conflicts: result.n_conflicts,
             final_alliance_mi: last.map(|m| m.alliance_mi).unwrap_or(0.0),
             final_declaration_jaccard: last.map(|m| m.declaration_jaccard).unwrap_or(0.0),
             final_mobilization_jaccard: last.map(|m| m.mobilization_jaccard).unwrap_or(0.0),
             final_round: result.final_round,
-            results_subdir: subdir_name,
         });
     }
 
-    let by = |label: &str| scenarios.iter().find(|s| s.trigger == label).unwrap();
+    let by = |label: &str| {
+        outcomes
+            .iter()
+            .find(|s| s.trigger == label)
+            .expect("トリガー条件の結果が無い")
+    };
     let null = by(Trigger::Null.label());
     let dardanelles = by(Trigger::Dardanelles.label());
     let archduke = by(Trigger::ArchdukeAssassination.label());
 
+    // 親が持つのは «条件をまたいだ» 量だけである．同盟分極化のギャップ
+    // (史実トリガー − null トリガー) は 1 本の run では測れない．
+    let mi_gap = archduke.final_alliance_mi - null.final_alliance_mi;
+    parent
+        .log_metrics(
+            SWEEP_SCOPE,
+            &[("alliance_mi_gap_archduke_minus_null", mi_gap)],
+        )
+        .expect("reproduce 親の集約指標の記録に失敗");
+
     // --- アンカー判定 (論文 Table 2-5 のヘッドライン story) ---
-    let mut anchors: Vec<ReproduceAnchor> = Vec::new();
-    let mut push = |name: &str, paper: &str, obs: f64, lo: f64, hi: f64| {
-        anchors.push(ReproduceAnchor {
-            name: name.to_string(),
-            paper_value: paper.to_string(),
-            observed: obs,
-            target_lo: lo,
-            target_hi: hi,
-            pass: obs >= lo && obs <= hi,
-        });
-    };
+    let anchors = [
+        // Table 2/3 中核: 史実トリガー (archduke) で世界大戦が勃発する (war_outbreak=1)．
+        Anchor {
+            name: "archduke trigger -> war outbreak (Table 2: WWI breaks out)",
+            paper_value: "outbreak=1",
+            observed: archduke.war_outbreak as f64,
+            target_lo: 1.0,
+            target_hi: 1.0,
+        },
+        // Table 4 (escalation): 史実トリガーは早期にエスカレーションする
+        // (>=1 hop の同盟国参戦; n_conflicts>=2)．
+        Anchor {
+            name: "archduke escalation conflict pairs (Table 4: allies pulled in)",
+            paper_value: ">=2",
+            observed: archduke.n_conflicts as f64,
+            target_lo: 2.0,
+            target_hi: f64::INFINITY,
+        },
+        // Table 2/5 (counterfactual baseline): null トリガーでは開戦しない (=0)．
+        Anchor {
+            name: "null trigger -> no war outbreak (Table 5: peace baseline)",
+            paper_value: "outbreak=0",
+            observed: null.war_outbreak as f64,
+            target_lo: 0.0,
+            target_hi: 0.0,
+        },
+        // Table 3 (cold war / 緊張): 中間強度 (dardanelles) は開戦せず緊張のみ．
+        Anchor {
+            name: "dardanelles trigger -> cold war, no outbreak (Table 3: tension)",
+            paper_value: "cold_war=1",
+            observed: dardanelles.cold_war_flag as f64,
+            target_lo: 1.0,
+            target_hi: 1.0,
+        },
+        // Table 2 (alliance polarization): 史実トリガーの最終 同盟MI > null の最終 同盟MI．
+        Anchor {
+            name: "archduke alliance polarization (Table 2: MI_archduke >= MI_null)",
+            paper_value: "archduke >= null",
+            observed: mi_gap,
+            target_lo: 0.0,
+            target_hi: f64::INFINITY,
+        },
+    ];
 
-    // Table 2/3 中核: 史実トリガー (archduke) で世界大戦が勃発する (war_outbreak=1)．
-    push(
-        "archduke trigger -> war outbreak (Table 2: WWI breaks out)",
-        "outbreak=1",
-        archduke.war_outbreak as f64,
-        1.0,
-        1.0,
-    );
-    // Table 4 (escalation): 史実トリガーは早期にエスカレーション (>=1 hop の同盟国参戦; n_conflicts>=2)．
-    push(
-        "archduke escalation conflict pairs (Table 4: allies pulled in)",
-        ">=2",
-        archduke.n_conflicts as f64,
-        2.0,
-        f64::INFINITY,
-    );
-    // Table 2/5 (counterfactual baseline): null トリガーでは開戦しない (=0)．
-    push(
-        "null trigger -> no war outbreak (Table 5: peace baseline)",
-        "outbreak=0",
-        null.war_outbreak as f64,
-        0.0,
-        0.0,
-    );
-    // Table 3 (cold war / 緊張): 中間強度 (dardanelles) は開戦せず緊張のみ (cold_war=1)．
-    push(
-        "dardanelles trigger -> cold war, no outbreak (Table 3: tension)",
-        "cold_war=1",
-        dardanelles.cold_war_flag as f64,
-        1.0,
-        1.0,
-    );
-    // Table 2 (alliance polarization): 史実トリガーの最終 同盟MI > null の最終 同盟MI (分極化が進む)．
-    push(
-        "archduke alliance polarization (Table 2: MI_archduke >= MI_null)",
-        "archduke >= null",
-        archduke.final_alliance_mi - null.final_alliance_mi,
-        0.0,
-        f64::INFINITY,
-    );
-
-    let n_pass = anchors.iter().filter(|a| a.pass).count();
+    let n_pass = anchors.iter().filter(|a| a.pass()).count();
     let n_anchors = anchors.len();
 
     println!("トリガー条件:");
-    for s in &scenarios {
-        let esc = if s.escalation_round >= 0 {
-            s.escalation_round.to_string()
-        } else {
-            "なし".to_string()
+    for s in &outcomes {
+        let esc = match s.escalation_round {
+            Some(r) => r.to_string(),
+            None => "なし".to_string(),
         };
         println!(
             "  [{:<22}] 開戦={} 冷戦={} 勃発R={} 紛争={} MI={:.3} 宣戦J={:.3} 総動員J={:.3} (round {})",
@@ -842,6 +912,7 @@ fn cmd_reproduce(args: ReproduceArgs) {
         );
     }
     println!("-------------------------------------------------");
+    // 帯は論文の主張ではなくこの再現実装が置いたものなので，記録せず表示だけする．
     for a in &anchors {
         let hi = if a.target_hi.is_infinite() {
             "∞".to_string()
@@ -850,7 +921,7 @@ fn cmd_reproduce(args: ReproduceArgs) {
         };
         println!(
             "[{}] {:<52} obs={:.4} target=[{:.2},{}] paper={}",
-            if a.pass { "PASS" } else { "OFF " },
+            if a.pass() { "PASS" } else { "OFF " },
             a.name,
             a.observed,
             a.target_lo,
@@ -861,25 +932,11 @@ fn cmd_reproduce(args: ReproduceArgs) {
     println!("-------------------------------------------------");
     println!("{n_pass}/{n_anchors} アンカーが in-band");
 
-    let summary = ReproduceSummary {
-        command: "reproduce",
-        paper: "Hua et al. (2024) WarAgent — Table 2-5 (historical trigger -> WWI outbreak \
-                + alliance escalation; null trigger -> peace baseline)",
-        scenario: scenario.label().to_string(),
-        mock: args.mock,
-        quick: args.quick,
-        scenarios,
-        anchors,
-        n_pass,
-        n_anchors,
-    };
-    let path = format!("{out_dir}/reproduce_summary.json");
-    write_json(&summary, &path).expect("reproduce_summary.json の書き込みに失敗");
-
-    let _ = refresh_latest_symlink(&args.output_dir, &format!("{ts}_reproduce"));
-
-    println!("サマリ → {out_dir}/reproduce_summary.json");
-    println!("各トリガー条件の metrics.csv / events.csv / run_metadata.json を各サブディレクトリに保存しました．");
+    let dir = parent
+        .finish()
+        .expect("runvault: reproduce 親 run の完了に失敗");
+    println!("集約     → {}/metrics.csv (scope=sweep)", dir.display());
+    println!("トリガー条件ごとの実行は lineage.parent_run_uid で親を指す子 run にある．");
     println!("図 (Table 2-5 風) は `uv run waragent-tools reproduce` で生成できます．");
 }
 
@@ -915,9 +972,8 @@ mod tests {
             war_threshold: 2,
             seed: Some(seed),
             llm: LlmSettings::default(),
-            output_dir: "results".to_string(),
         };
-        run_one(&cfg, true).expect("mock reproduce run failed")
+        run_with_client(&cfg, mock_war_client()).expect("mock reproduce run failed")
     }
 
     /// Table 2-5 のヘッドライン ordering: archduke は開戦・エスカレーションし，
@@ -969,5 +1025,36 @@ mod tests {
         assert_eq!(series(&a), series(&b), "同一 mock は完全再現すべき");
         assert_eq!(a.war_outbreak, b.war_outbreak);
         assert_eq!(a.escalation_round, b.escalation_round);
+    }
+
+    /// 掃引セルのシードは (base, trigger, stance, index) が同じなら常に同じ値になる．
+    /// この性質が壊れると，記録した master_seed から run を組み直せなくなる．
+    #[test]
+    fn sweep_seeds_are_reproducible_and_distinct() {
+        let base = sweep_seed(42, &Trigger::Null, &Stance::Conservative, 0);
+        assert_eq!(
+            base,
+            sweep_seed(42, &Trigger::Null, &Stance::Conservative, 0)
+        );
+        assert_ne!(
+            base,
+            sweep_seed(43, &Trigger::Null, &Stance::Conservative, 0),
+            "base が効いていない"
+        );
+        assert_ne!(
+            base,
+            sweep_seed(42, &Trigger::Dardanelles, &Stance::Conservative, 0),
+            "trigger が効いていない"
+        );
+        assert_ne!(
+            base,
+            sweep_seed(42, &Trigger::Null, &Stance::Aggressive, 0),
+            "stance が効いていない"
+        );
+        assert_ne!(
+            base,
+            sweep_seed(42, &Trigger::Null, &Stance::Conservative, 1),
+            "index が効いていない"
+        );
     }
 }

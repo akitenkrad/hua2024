@@ -1,9 +1,9 @@
 //! Mock 駆動のスモーク実行 (ライブ LLM 不要)．
 //!
 //! ライブ Ollama/OpenAI が使えない環境 (CI・ネットワーク遮断サンドボックス) で
-//! 出力パイプライン (metrics.csv / events.csv / run_metadata.json / config.json) と
+//! 出力パイプライン (run ディレクトリ・metrics.csv / events.jsonl / config.json) と
 //! Python 可視化を検証するための補助バイナリ．`socsim-llm::mock::ScriptedClient` で
-//! 決定論的に国の行動を駆動し，本番 `run` と同じ writer で結果を書き出す．
+//! 決定論的に国の行動を駆動し，本番 `run` と同じ runvault の run へ書く．
 //!
 //! 4 カ国 (wwi-small) × 2 ラウンド × secretary_passes=1 の小シナリオで，A が B に
 //! 公開宣戦布告 → B の同盟国がエスカレーション参戦するシナリオを擬似的に再現する．
@@ -14,20 +14,17 @@
 
 use std::env;
 
-use socsim_results::{refresh_latest_symlink, timestamp, write_json};
+use runvault::{Run, RunOptions};
 
 use socsim_llm::mock::ScriptedClient;
-use socsim_llm::PromptCache;
-use waragent_simulation::config::{Config, Scenario, Trigger};
+use socsim_llm::{LlmClient, PromptCache};
+use waragent_simulation::config::{scenario_country_count, Config, Scenario, Trigger};
 use waragent_simulation::llm::wrap_client;
-use waragent_simulation::simulation::{
-    ensure_output_dir, run_with_client, save_events, save_metrics, save_run_metadata,
-};
+use waragent_simulation::record::{self, DOMAIN, EXPERIMENT, REPO_ID};
+use waragent_simulation::simulation::run_with_client;
 
 fn main() {
     let base = env::args().nth(1).unwrap_or_else(|| "results".to_string());
-    let timestamp = timestamp();
-    let output_dir = format!("{base}/{timestamp}");
 
     let cfg = Config {
         scenario: Scenario::WwiSmall,
@@ -38,7 +35,6 @@ fn main() {
         // 同盟形成・総動員・宣戦が共存する状態を観測する (war_outbreak は false のまま)．
         war_threshold: 2,
         seed: Some(42),
-        output_dir: output_dir.clone(),
         ..Config::default()
     };
 
@@ -69,20 +65,32 @@ fn main() {
     });
     let client = wrap_client(backend, PromptCache::in_memory());
 
-    ensure_output_dir(&cfg.output_dir);
+    // クライアントは run を開始する前に組む (`llm` ブロックのため)．
+    let llm = record::llm_block(
+        client.inner().model(),
+        client.inner().endpoint(),
+        cfg.llm.temperature,
+    );
+    let parameters = cfg.to_run_config_json();
+    let mut rv = Run::start(
+        RunOptions::new(EXPERIMENT, "run")
+            .repo_id(REPO_ID)
+            .domain(DOMAIN)
+            .results_root(&base)
+            .parameters(&parameters)
+            .expect("runvault: parameters の組み立てに失敗")
+            .seed_pointers(["/seed"])
+            .master_seed(cfg.seed.expect("mock smoke は seed を固定する"))
+            .llm(llm)
+            .replication(record::replication()),
+    )
+    .expect("runvault: run の開始に失敗");
+
     let result = run_with_client(&cfg, client).expect("mock run failed");
-    save_metrics(&result.metrics_history, &cfg.output_dir);
-    save_events(&result.event_log, &cfg.output_dir);
-    save_run_metadata(&result, &cfg, &cfg.output_dir);
+    record::log_simulation(&mut rv, &result, scenario_country_count(cfg.scenario));
+    let dir = rv.finish().expect("runvault: run の完了に失敗");
 
-    // config.json (pretty-print JSON; socsim_results::write_json に委譲)．
-    let cfg_path = format!("{}/config.json", cfg.output_dir);
-    write_json(&cfg.to_run_config_json(), &cfg_path).unwrap();
-
-    // latest symlink (socsim_results::refresh_latest_symlink に委譲; best-effort)．
-    let _ = refresh_latest_symlink(&base, &timestamp);
-
-    println!("mock smoke wrote: {output_dir}");
+    println!("mock smoke wrote: {}", dir.display());
     let last = result.metrics_history.last().unwrap();
     println!(
         "final round={} alliance_mi={:.3} declaration_jaccard={:.3} mobilization_jaccard={:.3} n_conflicts={} war_outbreak={} cold_war={}",

@@ -2,18 +2,26 @@
 """
 visualize.py — Hua et al. (2024) WarAgent シミュレーション 可視化スクリプト
 
-results/latest (または --results_dir 指定先) の metrics.csv (round, alliance_mi, ...) と
-events.csv (round, actor, action, target, publicity) を読み，
+runvault の run ディレクトリからラウンド指標 (`metrics.csv`) と国の行動ログ
+(`events.jsonl` の `x.hua2024.action`) を読み，
 (1) 同盟ネットワーク図 (最終ラウンドの同盟 M エッジを networkx で描画),
 (2) Board 関係遷移 (ラウンドごとの宣戦布告/同盟/総動員の本数),
 (3) 指標時系列 (alliance_mi / declaration_jaccard / mobilization_jaccard),
 (4) 紛争規模・総動員数の時系列 (n_conflicts / n_mobilized)
 の 4 図 (2×2) を生成する．
 
+どの run を見るかは `--results-dir` を省略すれば runvault が答える
+(`runvault path --experiment waragent --latest --subcommand run --standalone`)．
+`results/` を自分で走査して新しそうなディレクトリを当てにいくことはしない．
+
+図は run ディレクトリの *隣* (`results/waragent/figures/<run_slug>/`) に置く．
+`manifest.csv` は `finish()` が確定させたもので，run が終わった後に足したものは
+そこに載らないためである．
+
 Usage:
     uv run waragent-tools visualize
-    uv run waragent-tools visualize --results_dir results/20260524_153000
-    uv run waragent-tools visualize --output_dir out
+    uv run waragent-tools visualize --results-dir "$(runvault path --experiment waragent --latest --subcommand run --standalone)"
+    uv run waragent-tools visualize --output-dir out
 
 Outputs:
     output_dir/
@@ -28,6 +36,9 @@ import os
 import matplotlib.pyplot as plt
 import networkx as nx
 import pandas as pd
+from runvault.read import figures_dir
+
+from waragent_tools.runs import load_events, load_metrics, resolve_run_dir
 
 # --------------------------------------------------------------------------- #
 # 日本語フォント設定
@@ -48,19 +59,6 @@ COLOR_WAR = "#F44336"
 def _letter(idx: int) -> str:
     """raw u64 id を匿名国名ラベルへ (0 -> A)．"""
     return f"Country {chr(ord('A') + int(idx))}"
-
-
-def load_metrics(path: str) -> pd.DataFrame:
-    if not os.path.exists(path):
-        raise FileNotFoundError(f"metrics.csv が見つかりません: {path}")
-    return pd.read_csv(path)
-
-
-def load_events(path: str) -> pd.DataFrame:
-    if not os.path.exists(path):
-        # events.csv は任意 (古い run には無いかもしれない)．
-        return pd.DataFrame(columns=["round", "actor", "action", "target", "publicity"])
-    return pd.read_csv(path)
 
 
 def _build_relation_graph(events: pd.DataFrame, up_to_round: int) -> nx.Graph:
@@ -199,14 +197,20 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument(
         "--results_dir",
         "--results-dir",
-        default="results/latest",
-        help="Rust シミュレーションの出力ディレクトリ (default: results/latest)",
+        default=None,
+        help="run ディレクトリ (省略時は runvault path --latest が解決する)",
+    )
+    p.add_argument(
+        "--results_root",
+        "--results-root",
+        default="results",
+        help="runvault の results root (default: results)",
     )
     p.add_argument(
         "--output_dir",
         "--output-dir",
         default=None,
-        help="図の保存先ディレクトリ (default: {results_dir}/figures)",
+        help="図の保存先ディレクトリ (default: results/waragent/figures/<run_slug>/)",
     )
     return p.parse_args(argv)
 
@@ -214,19 +218,17 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 def main(argv: list[str] | None = None) -> None:
     args = parse_args(argv)
 
-    metrics_path = os.path.join(args.results_dir, "metrics.csv")
-    events_path = os.path.join(args.results_dir, "events.csv")
-    out_dir = args.output_dir if args.output_dir else os.path.join(args.results_dir, "figures")
+    run_dir = resolve_run_dir(args.results_dir, args.results_root)
+    out_dir = args.output_dir if args.output_dir else figures_dir(run_dir)
     os.makedirs(out_dir, exist_ok=True)
 
     print("=== Hua et al. (2024) WarAgent 外交動態 可視化 ===")
-    print(f"メトリクス: {metrics_path}")
-    print(f"イベント:   {events_path}")
+    print(f"run:      {run_dir}")
     print(f"出力先:     {out_dir}")
     print("-----------------------------------------")
 
-    metrics = load_metrics(metrics_path)
-    events = load_events(events_path)
+    metrics = load_metrics(run_dir)
+    events = load_events(run_dir)
     n_rounds = metrics["round"].nunique()
     print(f"      {n_rounds} ラウンド分の指標, {len(events)} 行動イベント")
     print("[1/1] 外交動態図 (同盟網・Board 遷移・指標・紛争規模) を保存中 ...")

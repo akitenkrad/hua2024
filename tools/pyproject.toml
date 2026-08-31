@@ -9,6 +9,7 @@ dependencies = [
     "pandas>=2.2",
     "networkx>=3.2",
     "socsim-tools",
+    "runvault[read]",
 ]
 
 [project.scripts]

@@ -9,10 +9,10 @@ replications/hua2024/
 ├── Cargo.toml                  # Rust workspace (members = ["simulation"])
 ├── pyproject.toml              # uv workspace (members = ["tools"])
 ├── simulation/                 # Rust crate `waragent-simulation` (bin `waragent`)
-│   ├── Cargo.toml              # socsim-core + socsim-engine + socsim-net + socsim-llm (features=["live"])
+│   ├── Cargo.toml              # socsim-core + socsim-engine + socsim-net + socsim-llm (features=["live"]) + runvault
 │   ├── examples/mock_smoke.rs  # offline (no live LLM) pipeline smoke
 │   ├── src/
-│   │   ├── main.rs             # clap: run / sweep
+│   │   ├── main.rs             # clap: run / sweep / reproduce
 │   │   ├── lib.rs
 │   │   ├── config.rs           # Config, Scenario, Trigger, Stance, LLM settings, WWI scenario data
 │   │   ├── world.rs            # WarWorld (WorldState), Country, Profile, Action, Event
@@ -21,13 +21,16 @@ replications/hua2024/
 │   │   ├── llm.rs              # socsim-llm builder (Ollama→OpenAI + cache)
 │   │   ├── prompts.rs          # 4-step decision prompt + secretary prompt + response parsing
 │   │   ├── metrics.rs          # alliance MI / declaration & mobilization Jaccard / partition / network
-│   │   └── simulation.rs       # init_world + run drivers + output writers
+│   │   ├── record.rs           # what goes into a runvault run (research / llm block / metrics / events)
+│   │   └── simulation.rs       # init_world + run driver
 │   └── tests/integration_test.rs   # mock-driven (ScriptedClient); no live LLM
 ├── tools/                      # Python package `waragent-tools` (module `waragent_tools`)
 │   └── src/waragent_tools/
 │       ├── cli.py
+│       ├── runs.py             # resolving a run directory and reading metrics / events back
 │       ├── visualize.py        # alliance network + board transitions + metric time series
 │       ├── visualize_sweep.py  # trigger × stance war-outbreak / alliance-MI heatmaps
+│       ├── reproduce_paper.py  # the paper's Table 2-5 headline story
 │       └── show_experiment_settings.py
 └── docs/                       # bilingual (.md + .ja.md)
 ```

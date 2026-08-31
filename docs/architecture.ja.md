@@ -9,10 +9,10 @@ replications/hua2024/
 ├── Cargo.toml                  # Rust workspace (members = ["simulation"])
 ├── pyproject.toml              # uv workspace (members = ["tools"])
 ├── simulation/                 # Rust crate `waragent-simulation` (bin `waragent`)
-│   ├── Cargo.toml              # socsim-core + socsim-engine + socsim-net + socsim-llm (features=["live"])
+│   ├── Cargo.toml              # socsim-core + socsim-engine + socsim-net + socsim-llm (features=["live"]) + runvault
 │   ├── examples/mock_smoke.rs  # オフライン (ライブ LLM 不要) パイプラインスモーク
 │   ├── src/
-│   │   ├── main.rs             # clap: run / sweep
+│   │   ├── main.rs             # clap: run / sweep / reproduce
 │   │   ├── lib.rs
 │   │   ├── config.rs           # Config, Scenario, Trigger, Stance, LLM 設定, WWI シナリオデータ
 │   │   ├── world.rs            # WarWorld (WorldState), Country, Profile, Action, Event
@@ -21,13 +21,16 @@ replications/hua2024/
 │   │   ├── llm.rs              # socsim-llm ビルダ (Ollama→OpenAI + キャッシュ)
 │   │   ├── prompts.rs          # 4 ステップ意思決定プロンプト + 秘書プロンプト + 応答パース
 │   │   ├── metrics.rs          # 同盟 MI / 宣戦・総動員 Jaccard / 分割 / ネットワーク
-│   │   └── simulation.rs       # init_world + run ドライバ + 出力 writer
+│   │   ├── record.rs           # runvault の run へ何を書くか (research / llm ブロック / 指標 / イベント)
+│   │   └── simulation.rs       # init_world + run ドライバ
 │   └── tests/integration_test.rs   # mock 駆動 (ScriptedClient); ライブ LLM 不要
 ├── tools/                      # Python package `waragent-tools` (module `waragent_tools`)
 │   └── src/waragent_tools/
 │       ├── cli.py
+│       ├── runs.py             # run ディレクトリの解決と指標 / イベントの読み出し
 │       ├── visualize.py        # 同盟ネットワーク + Board 遷移 + 指標時系列
 │       ├── visualize_sweep.py  # トリガー × スタンス の開戦率 / 同盟 MI ヒートマップ
+│       ├── reproduce_paper.py  # 論文 Table 2-5 ヘッドライン story
 │       └── show_experiment_settings.py
 └── docs/                       # bilingual (.md + .ja.md)
 ```

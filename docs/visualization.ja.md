@@ -6,38 +6,44 @@ Python パッケージ `waragent-tools` (uv workspace メンバ; モジュール
 
 ## `visualize`
 
-`results/{dir}/metrics.csv` と `events.csv` を読み，1 枚の 2×2 図 `war_dynamics.png` を書き出す:
+run ディレクトリの `metrics.csv` (long 形式) と `events.jsonl` の `x.hua2024.action` イベントを読み，1 枚の 2×2 図 `war_dynamics.png` を書き出す:
 
 1. **同盟 / 宣戦ネットワーク** (最終ラウンド) — `networkx` の円形グラフ; 同盟 (M) エッジは緑，宣戦 (W; エスカレーション参戦を含む) エッジは赤破線; ノードは匿名国名 (Country A..H)．
 2. **Board 遷移** — ラウンドごとの `declare_war` / `alliance` / `non_aggression` / `mobilize` 行動の本数．
 3. **指標時系列** — `alliance_mi`, `declaration_jaccard`, `mobilization_jaccard` のラウンド推移．
 4. **紛争規模** — `n_conflicts` (宣戦対) と `n_mobilized` (総動員国) のラウンド推移 (エスカレーション)．
 
+どの run を見るかは `--results-dir` を省略すれば runvault が答える (`runvault path --experiment waragent --latest --subcommand run --standalone`)．図は run ディレクトリの *隣* (`results/waragent/figures/<run_slug>/`) に置く — `manifest.csv` は `finish()` が確定させたもので，後から足したものはハッシュを持たないためである．
+
 ```bash
 uv run waragent-tools visualize
-uv run waragent-tools visualize --results_dir results/20260524_153000 --output_dir out
+uv run waragent-tools visualize --results-dir "$(runvault path --experiment waragent --latest --subcommand run --standalone)"
+uv run waragent-tools visualize --output-dir out
 ```
 
 ## `visualize-sweep`
 
-`results/{dir}_sweep/sweep_summary.csv` を読み，以下を書き出す:
+掃引親 run の子 run から 1 行 1 実行の表を組み直し (runvault はこの表をディスクに持たない)，以下を書き出す:
 
 - `sweep_outbreak_heatmap.png` — トリガー × スタンス の開戦率．
 - `sweep_alliance_mi_heatmap.png` — トリガー × スタンス の平均 `final_alliance_mi`．
 - `sweep_trigger_bars.png` — トリガー別の開戦率 vs 冷戦率 (「微小トリガーでも開戦 / null は冷戦に留まる」傾向)．
 
 ```bash
-uv run waragent-tools visualize-sweep --sweep_dir results/20260524_160000_sweep
+uv run waragent-tools visualize-sweep
+uv run waragent-tools visualize-sweep --sweep-dir "$(runvault path --experiment waragent --latest --subcommand sweep)"
 ```
 
-注: `null` トリガーラベルは欠損値ではなく文字列として読む．
+注: legacy な `sweep_summary.csv` があればそちらを読む．その場合 `null` トリガーラベルは欠損値ではなく文字列として読む．
 
 ## `reproduce`
 
-`results/{dir}_reproduce/reproduce_summary.json` とトリガー条件ごとの `metrics.csv` を読み，観測値 vs 論文値の Table 2–5 アンカー表を表示し，以下を書き出す:
+`reproduce` 親 (親の `scope=sweep` 同盟分極化ギャップ) と条件ごとの子 run を読み，トリガー条件別の表を表示し，以下を書き出す:
 
-- `figures/table2_alliance_escalation.png` — トリガー別の `alliance_mi` と `n_conflicts` の時系列 (同盟分極化・エスカレーション)．
-- `figures/table5_trigger_compare.png` — トリガー別のクロス比較バー: 開戦 / 冷戦フラグと最終 同盟 MI．
+- `table2_alliance_escalation.png` — トリガー別の `alliance_mi` と `n_conflicts` の時系列 (同盟分極化・エスカレーション)．
+- `table5_trigger_compare.png` — トリガー別のクロス比較バー: 開戦 / 冷戦フラグと最終 同盟 MI．
+
+アンカーの帯と PASS/off の判定はここでは出さない．帯は論文の主張ではなくこの再現実装が置いたものなので Rust 側のコンソールにだけ残す — 同じ閾値を 2 箇所に置くと食い違う余地ができる．
 
 ```bash
 uv run waragent-tools reproduce
@@ -47,11 +53,12 @@ uv run waragent-tools reproduce --json                 # サマリのみ表示
 
 ## `show-experiment-settings`
 
-`config.json` (run) または `sweep_config.json` (sweep) に加え `run_metadata.json` (モデル / endpoint / 温度 / seed / cache-hit 率 / 開戦 / 冷戦) を整形表示する．`results/latest` も解決する．
+run の実験条件 (`config.json` の `parameters`)・`run.json` の `llm` ブロック・run スコープ指標 (呼び出し数・cache-hit・実行ラウンド数・冷戦フラグ・勃発ラウンド) を整形表示する．legacy の `config.json` / `sweep_config.json` / `run_metadata.json` も従来どおり読む．
 
 ```bash
-uv run waragent-tools show-experiment-settings --results-dir results/latest
-uv run waragent-tools show-experiment-settings --results-dir results/latest --json
+uv run waragent-tools show-experiment-settings
+uv run waragent-tools show-experiment-settings --results-dir "$(runvault path --experiment waragent --latest --subcommand sweep)"
+uv run waragent-tools show-experiment-settings --json
 ```
 
 ## フォント注記
