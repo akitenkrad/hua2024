@@ -29,7 +29,7 @@ use waragent_simulation::config::{
 };
 use waragent_simulation::llm::{build_live_client, wrap_client, WarClient};
 use waragent_simulation::record::{self, DOMAIN, EXPERIMENT, REPO_ID, SWEEP_SCOPE};
-use waragent_simulation::simulation::{run_with_client, SimulationResult};
+use waragent_simulation::simulation::{run_with_client_observed, SimulationResult};
 use waragent_simulation::world::Stance;
 
 // ---------------------------------------------------------------------------
@@ -380,6 +380,19 @@ fn cmd_run(args: RunArgs) {
     println!("出力先: {}", rv.dir().display());
     println!("-------------------------------------------------");
 
+    // 進捗の 1 単位は 1 ラウンド．費用がそこにあり，1 ラウンドは全国にその
+    // ラウンドの行動を尋ね，さらに秘書検証を secretary_passes 回かける —
+    // どれもモデル呼び出しである．試行を単位にすると，ライブの 1 本は 0/1 と
+    // 出したきり終わりまで黙る．
+    //
+    // 分母は持たない．`BoardUpdateMechanism` は世界大戦が勃発した時点で
+    // `request_stop()` するので，`rounds` は «上限» であって仕事の量ではない．
+    // mock の実測では既定の archduke-assassination トリガーが 6 ラウンド中
+    // 1 ラウンド目で止まり，null と dardanelles は 6 ラウンド回った — 同じ
+    // `--rounds 6` に対して 6 倍の開きがある．何ラウンド目で止まるかは
+    // 走らせるまで分からないので，上限を分母に置けば見積もりは «自信をもって
+    // 外れた» ものになる．
+    let mut stage = rv.unbounded_stage("rounds");
     let mut last_result: Option<SimulationResult> = None;
     let mut outbreak_count = 0usize;
     let mut cold_war_count = 0usize;
@@ -392,7 +405,8 @@ fn cmd_run(args: RunArgs) {
         };
 
         let client = pending.take().unwrap_or_else(|| build_client(&cfg, false));
-        let result = run_with_client(&cfg, client).unwrap_or_else(|e| panic!("実行に失敗: {e}"));
+        let result = run_with_client_observed(&cfg, client, |_| stage.tick())
+            .unwrap_or_else(|e| panic!("実行に失敗: {e}"));
         if result.war_outbreak {
             outbreak_count += 1;
         }
@@ -406,6 +420,10 @@ fn cmd_run(args: RunArgs) {
             last_result = Some(result);
         }
     }
+
+    // manifest.csv は finish() で封をされる．その後に 1 行足せば，manifest が
+    // 食い違うダイジェストを持つことになる．
+    stage.close();
 
     println!(
         "開戦発生: {}/{} ({:.1}%) | 冷戦 (緊張のみ): {}/{}",
@@ -512,6 +530,12 @@ fn cmd_sweep(args: SweepArgs) {
     let mut console: Vec<(&'static str, bool, f64)> = Vec::with_capacity(n_total);
     let mut done = 0usize;
 
+    // 掃引全体で stage を 1 つ．トリガーごとに開け直すと小さな tally が 3 つ並ぶ
+    // だけで，掃引全体の進み方が読めなくなる．勃発で早期に止まるかどうかは
+    // トリガーで決まるため 1 試行の長さは条件で変わるが，stage は分母を持たない
+    // ので守るべき割合も見積もりも無く，分ける理由にならない．
+    let mut stage = parent.unbounded_stage("rounds");
+
     for &trigger in &triggers {
         for &stance in &stances {
             for run_idx in 0..args.runs {
@@ -544,8 +568,8 @@ fn cmd_sweep(args: SweepArgs) {
                 )
                 .expect("runvault: 子 run の開始に失敗");
 
-                let result =
-                    run_with_client(&cfg, client).unwrap_or_else(|e| panic!("実行に失敗: {e}"));
+                let result = run_with_client_observed(&cfg, client, |_| stage.tick())
+                    .unwrap_or_else(|e| panic!("実行に失敗: {e}"));
                 record::log_simulation(&mut child, &result, scenario_country_count(scenario));
                 child.finish().expect("runvault: 子 run の完了に失敗");
 
@@ -567,6 +591,10 @@ fn cmd_sweep(args: SweepArgs) {
             );
         }
     }
+
+    // manifest.csv は finish() で封をされる．その後に 1 行足せば，manifest が
+    // 食い違うダイジェストを持つことになる．
+    stage.close();
 
     let dir = parent
         .finish()
@@ -775,6 +803,12 @@ fn cmd_reproduce(args: ReproduceArgs) {
 
     let mut outcomes: Vec<TriggerOutcome> = Vec::new();
 
+    // 3 トリガーを通して stage は 1 つ，親 run に開ける．トリガー条件は子 run に
+    // 分かれているが，reproduce 全体の進み方は 1 つのログで読めたほうがよい．
+    // トリガーごとに開け直すと小さな tally が 3 つ並ぶだけになる (理由は sweep と
+    // 同じ)．
+    let mut stage = parent.unbounded_stage("rounds");
+
     for trigger in triggers {
         let seed = socsim_core::derive_seed(args.seed, &[label_hash(trigger.label())]);
         let cfg = Config {
@@ -806,7 +840,8 @@ fn cmd_reproduce(args: ReproduceArgs) {
         )
         .expect("runvault: 子 run の開始に失敗");
 
-        let result = run_with_client(&cfg, client).unwrap_or_else(|e| panic!("実行に失敗: {e}"));
+        let result = run_with_client_observed(&cfg, client, |_| stage.tick())
+            .unwrap_or_else(|e| panic!("実行に失敗: {e}"));
         record::log_simulation(&mut child, &result, scenario_country_count(scenario));
         child.finish().expect("runvault: 子 run の完了に失敗");
 
@@ -823,6 +858,10 @@ fn cmd_reproduce(args: ReproduceArgs) {
             final_round: result.final_round,
         });
     }
+
+    // manifest.csv は finish() で封をされる．その後に 1 行足せば，manifest が
+    // 食い違うダイジェストを持つことになる．
+    stage.close();
 
     let by = |label: &str| {
         outcomes
@@ -959,6 +998,9 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    // 試験は移行前と同じ入口を呼ぶ (コールバック無しの薄い包み)．本体は
+    // これを使わないので，import はここに置く．
+    use waragent_simulation::simulation::run_with_client;
 
     /// reproduce と同じ設定で 1 トリガー条件を mock 実行する (offline)．
     fn reproduce_one(trigger: Trigger) -> SimulationResult {

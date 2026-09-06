@@ -92,6 +92,24 @@ pub fn run_with_client(
     cfg: &Config,
     client: WarClient,
 ) -> std::result::Result<SimulationResult, String> {
+    run_with_client_observed(cfg, client, |_| {})
+}
+
+/// The same, calling `on_round` once for every round of the simulation.
+///
+/// The callback is where a caller counts its progress. A round is the unit
+/// because it is the unit the cost is in: one round asks every country for an
+/// action and then verifies it `secretary_passes` times, all of them model
+/// calls. A trial of `rounds` rounds would be a single tick, which is the
+/// granularity that leaves a live run silent for the whole of it.
+///
+/// It is given the round number rather than nothing so a caller can report
+/// against the clock rather than against its own tally.
+pub fn run_with_client_observed(
+    cfg: &Config,
+    client: WarClient,
+    mut on_round: impl FnMut(u64),
+) -> std::result::Result<SimulationResult, String> {
     let root = cfg.seed.unwrap_or_else(rand::random);
 
     let mut init_rng = SimRng::from_seed(derive_seed(root, &[RNG_WORLD_INIT]));
@@ -128,6 +146,7 @@ pub fn run_with_client(
     let mut final_round = 0usize;
     sim.run_observed(|report| {
         final_round = report.t as usize;
+        on_round(report.t);
         if escalation_round.is_none() {
             if let Some(outbreak) = report.scratch.get::<bool>("war_outbreak") {
                 if *outbreak {
