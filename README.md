@@ -86,6 +86,11 @@ uv run waragent-tools reproduce --run --mock --quick
 
 The mock policy scales the most belligerent country's behavior by the injected breaking-event intensity: `archduke` (highest) declares war and pulls in allies (war outbreak + escalation), `dardanelles` (intermediate) mobilizes only (cold war, no outbreak), and `null` stays at peace — recovering the paper's qualitative ordering. Because the local default model (`llama3.2`) differs from the paper's GPT-4 / Claude-2, fidelity targets the qualitative trend (historical trigger escalates to war; null trigger remains a cold war / peace; alliance MI exceeds random), not the absolute Table 2 values.
 
+
+## Scratch runs
+
+Use `--scratch` for development, debugging, and smoke-test runs. Scratch runs are created under `results/_scratch/`, are never synced to the vault, and the latest scratch run can be located with `runvault path --scratch`.
+
 ## Outputs
 
 Where the output goes and how it is named belongs to [runvault](https://github.com/akitenkrad/rs-runvault): each subcommand invocation becomes one run directory under `results/waragent/<run_slug>/` (a sweep is one parent plus one child per cell). There is no timestamped directory of our own and no `latest` symlink.

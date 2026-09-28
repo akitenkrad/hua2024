@@ -44,6 +44,9 @@ use waragent_simulation::world::Stance;
 struct Cli {
     #[command(subcommand)]
     command: Commands,
+    /// Development run: write it under results/_scratch/ so it is never synced to the vault.
+    #[arg(long, global = true)]
+    scratch: bool,
 
     /// Ollama 接続先 URL（指定時は環境変数 OLLAMA_HOST を上書きする）．
     #[arg(long, global = true)]
@@ -291,9 +294,16 @@ fn build_client(cfg: &Config, mock: bool) -> WarClient {
 }
 
 /// `RunOptions` の共通部分 (シミュレーション 1 本ぶんの子/単独 run)．
-fn run_options(cfg: &Config, output_dir: &str, seed: u64, client: &WarClient) -> RunOptions {
+fn run_options(
+    cfg: &Config,
+    output_dir: &str,
+    seed: u64,
+    client: &WarClient,
+    scratch: bool,
+) -> RunOptions {
     let parameters = cfg.to_run_config_json();
     RunOptions::new(EXPERIMENT, "run")
+        .scratch(scratch)
         .repo_id(REPO_ID)
         .domain(DOMAIN)
         .results_root(output_dir)
@@ -313,7 +323,7 @@ fn run_options(cfg: &Config, output_dir: &str, seed: u64, client: &WarClient) ->
 // run
 // ---------------------------------------------------------------------------
 
-fn cmd_run(args: RunArgs) {
+fn cmd_run(args: RunArgs, scratch: bool) {
     let scenario = parse_scenario(&args.scenario).unwrap_or_else(|e| panic!("{e}"));
     let trigger = parse_trigger(&args.trigger).unwrap_or_else(|e| panic!("{e}"));
     let stance_override: Option<Stance> = args
@@ -354,6 +364,7 @@ fn cmd_run(args: RunArgs) {
             &args.output_dir,
             recorded_seed,
             pending.as_ref().expect("直前に組んだクライアント"),
+            scratch,
         )
         .replicate_index((runs - 1) as u64),
     )
@@ -465,7 +476,7 @@ fn cmd_run(args: RunArgs) {
 // sweep
 // ---------------------------------------------------------------------------
 
-fn cmd_sweep(args: SweepArgs) {
+fn cmd_sweep(args: SweepArgs, scratch: bool) {
     let scenario: Scenario = parse_scenario(&args.scenario).unwrap_or_else(|e| panic!("{e}"));
     let triggers: Vec<Trigger> = split_csv(&args.trigger_values)
         .iter()
@@ -496,6 +507,7 @@ fn cmd_sweep(args: SweepArgs) {
     };
     let parent = Run::start(
         RunOptions::new(EXPERIMENT, "sweep")
+            .scratch(scratch)
             .repo_id(REPO_ID)
             .domain(DOMAIN)
             .results_root(&args.output_dir)
@@ -558,7 +570,7 @@ fn cmd_sweep(args: SweepArgs) {
                 // 分ける．parameters は手で回した `run` と同じ形なので，同じ条件
                 // なら config_hash が一致する．
                 let mut child = Run::start(
-                    run_options(&cfg, &args.output_dir, seed, &client)
+                    run_options(&cfg, &args.output_dir, seed, &client, scratch)
                         .replicate_index(run_idx as u64)
                         .lineage(Lineage {
                             sweep_id: Some(sweep_id.clone()),
@@ -745,7 +757,7 @@ impl Anchor {
     }
 }
 
-fn cmd_reproduce(args: ReproduceArgs) {
+fn cmd_reproduce(args: ReproduceArgs, scratch: bool) {
     let scenario = parse_scenario(&args.scenario).unwrap_or_else(|e| panic!("{e}"));
     let rounds = if args.quick { 2 } else { args.rounds };
 
@@ -772,6 +784,7 @@ fn cmd_reproduce(args: ReproduceArgs) {
     };
     let mut parent = Run::start(
         RunOptions::new(EXPERIMENT, "reproduce")
+            .scratch(scratch)
             .repo_id(REPO_ID)
             .domain(DOMAIN)
             .results_root(&args.output_dir)
@@ -830,7 +843,7 @@ fn cmd_reproduce(args: ReproduceArgs) {
         let client = build_client(&cfg, args.mock);
 
         let mut child = Run::start(
-            run_options(&cfg, &args.output_dir, seed, &client)
+            run_options(&cfg, &args.output_dir, seed, &client, scratch)
                 .replicate_index(0)
                 .lineage(Lineage {
                     sweep_id: Some(sweep_id.clone()),
@@ -985,13 +998,14 @@ fn cmd_reproduce(args: ReproduceArgs) {
 
 fn main() {
     let cli = Cli::parse();
+    let scratch = cli.scratch;
     if let Some(host) = cli.ollama_host.as_deref() {
         std::env::set_var("OLLAMA_HOST", host);
     }
     match cli.command {
-        Commands::Run(args) => cmd_run(args),
-        Commands::Sweep(args) => cmd_sweep(args),
-        Commands::Reproduce(args) => cmd_reproduce(args),
+        Commands::Run(args) => cmd_run(args, scratch),
+        Commands::Sweep(args) => cmd_sweep(args, scratch),
+        Commands::Reproduce(args) => cmd_reproduce(args, scratch),
     }
 }
 

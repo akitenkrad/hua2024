@@ -86,6 +86,11 @@ uv run waragent-tools reproduce --run --mock --quick
 
 mock ポリシーは，注入された breaking-event の強度でもっとも好戦的な国の行動をスケールする: `archduke` (最高強度) は宣戦布告し同盟国を巻き込む (開戦 + エスカレーション)，`dardanelles` (中間強度) は総動員のみ (冷戦・開戦なし)，`null` は平時 — これで論文の定性的 ordering を再現する．ローカル既定モデル (`llama3.2`) は論文の GPT-4 / Claude-2 と異なるため，再現忠実度は «傾向» (史実トリガーは開戦へ; null トリガーは冷戦 / 平時; 同盟 MI はランダムより高い) を目標とし，Table 2 の絶対値の一致は狙わない．
 
+
+## Scratch run
+
+開発中・デバッグ中・動作確認の実行には `--scratch` を付ける．run は `results/_scratch/` に作られ，同期されない．最新の scratch run は `runvault path --scratch` で取得できる．
+
 ## 出力
 
 出力の置き場と同一性は [runvault](https://github.com/akitenkrad/rs-runvault) が持つ．サブコマンド 1 回が `results/waragent/<run_slug>/` の run ディレクトリ 1 本になる (掃引は親 1 本 + セルごとの子)．自前のタイムスタンプ付きディレクトリも `latest` シンボリックリンクも作らない．
