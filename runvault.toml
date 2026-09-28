@@ -1,3 +1,105 @@
-# Metric descriptions are not written yet (MYTASK-3382). Until they are,
-# runvault records undeclared metrics instead of refusing them.
-require_docs = false
+# 指標が何を測っているか (runvault の宣言．rs-runvault docs/metrics.ja.md)．
+#
+# 名前は `simulation/src/record.rs` と `simulation/src/main.rs` が書いているものと
+# 一致していなければならない．`reproduce` 親だけが持つ条件間差は scope=sweep，
+# 各トリガー条件の値は子 run の scope=run に置かれる．
+#
+# `direction` は «どちらが良いか»．史実との一致度も開戦・動員の規模も WarAgent
+# 模型の記述量であり，成績とは定めないため `none` を書く．
+
+# --- ラウンドごと (scope=run, step=round) ---------------------------------
+
+[metrics."alliance_mi"]
+meaning   = "シミュレートされた同盟分割と史実 WWI 同盟分割の正規化相互情報量"
+unit      = "ratio"
+direction = "none"
+range     = [0.0, 1.0]
+scope     = ["run"]
+
+[metrics."declaration_jaccard"]
+meaning   = "シミュレートされた宣戦対集合と史実の宣戦対集合の Jaccard 係数"
+unit      = "ratio"
+direction = "none"
+range     = [0.0, 1.0]
+scope     = ["run"]
+
+[metrics."mobilization_jaccard"]
+meaning   = "シミュレートされた総動員国集合と史実の総動員国集合の Jaccard 係数"
+unit      = "ratio"
+direction = "none"
+range     = [0.0, 1.0]
+scope     = ["run"]
+
+[metrics."n_conflicts"]
+meaning   = "そのラウンドまでに成立した宣戦関係の国対数"
+unit      = "count"
+direction = "none"
+scope     = ["run"]
+
+[metrics."n_mobilized"]
+meaning   = "そのラウンドで総動員状態にある国の数"
+unit      = "count"
+direction = "none"
+scope     = ["run"]
+
+[metrics."n_alliance_clusters"]
+meaning   = "そのラウンドの同盟関係から得た連結成分の数"
+unit      = "count"
+direction = "none"
+scope     = ["run"]
+
+[metrics."war_outbreak"]
+meaning   = "そのラウンドまでに世界大戦のしきい値へ達したなら 1，未到達なら 0"
+unit      = "boolean"
+direction = "none"
+range     = [0.0, 1.0]
+scope     = ["run"]
+
+# --- run 全体と LLM の呼び出し -------------------------------------------
+
+[metrics."final_round"]
+meaning   = "停止したときの最終ラウンド番号"
+unit      = "count"
+direction = "none"
+scope     = ["run"]
+
+[metrics."cold_war_flag"]
+meaning   = "開戦しないまま総動員または同盟構造の変化が生じた冷戦状態なら 1，それ以外なら 0"
+unit      = "boolean"
+direction = "none"
+range     = [0.0, 1.0]
+scope     = ["run"]
+
+[metrics."escalation_round"]
+meaning   = "同盟国の参戦によるエスカレーションが最初に起きたラウンド"
+unit      = "count"
+direction = "none"
+scope     = ["run"]
+
+[metrics."llm_calls"]
+meaning   = "この run が行った LLM の呼び出し回数"
+unit      = "count"
+direction = "none"
+scope     = ["run"]
+
+[metrics."llm_cache_hits"]
+meaning   = "LLM 呼び出しのうちキャッシュで応答した回数"
+unit      = "count"
+direction = "none"
+scope     = ["run"]
+
+[metrics."llm_cache_hit_rate"]
+meaning   = "LLM 呼び出しのうちキャッシュで応答した割合"
+unit      = "ratio"
+direction = "up"
+range     = [0.0, 1.0]
+scope     = ["run"]
+
+# --- reproduce の条件間比較 -----------------------------------------------
+
+[metrics."alliance_mi_gap_archduke_minus_null"]
+meaning   = "archduke-assassination 条件の最終同盟 NMI から null 条件の最終同盟 NMI を引いた差"
+unit      = "ratio"
+direction = "none"
+range     = [-1.0, 1.0]
+scope     = ["sweep"]
