@@ -261,6 +261,7 @@ fn split_csv(s: &str) -> Vec<String> {
 /// LLM レイヤ設定を組む．mock は永続キャッシュを持たないので `cache_path` を落とす．
 fn llm_settings(temperature: f32, seed: u64, cache_path: &str, mock: bool) -> LlmSettings {
     LlmSettings {
+        think: None,
         temperature,
         seed,
         cache_path: (!mock).then(|| cache_path.to_string()),
